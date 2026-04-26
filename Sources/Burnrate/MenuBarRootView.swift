@@ -912,6 +912,21 @@ private struct FooterView: View {
             .buttonStyle(.plain)
             .foregroundStyle(DesignSystem.Colors.secondaryText)
 
+            Button {
+                self.model.toggleLaunchAtLogin()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: self.model.isLaunchAtLoginEnabled ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(self.model.isLaunchAtLoginEnabled ? DesignSystem.Colors.success : DesignSystem.Colors.tertiaryText)
+                    Text("Login")
+                }
+            }
+            .font(DesignSystem.Typography.caption)
+            .buttonStyle(.plain)
+            .foregroundStyle(DesignSystem.Colors.secondaryText)
+            .help(self.model.isLaunchAtLoginEnabled ? "Disable launching burnrate at login" : "Launch burnrate when you log in")
+
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }

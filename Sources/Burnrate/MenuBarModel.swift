@@ -10,6 +10,7 @@ final class MenuBarModel {
     var isRefreshing = false
     var lastError: String?
     var alertMode: UsageAlertMode = UsageAlertMode(rawValue: UserDefaults.standard.string(forKey: UsageNotificationController.alertModeKey) ?? "") ?? .all
+    var isLaunchAtLoginEnabled: Bool = LaunchAtLoginManager.isEnabled
 
     private let source = UsageSnapshotSource()
     private let notificationController = UsageNotificationController()
@@ -62,5 +63,18 @@ final class MenuBarModel {
     func cycleAlertMode() {
         self.alertMode = self.alertMode.next
         UserDefaults.standard.set(self.alertMode.rawValue, forKey: UsageNotificationController.alertModeKey)
+    }
+
+    func toggleLaunchAtLogin() {
+        do {
+            if self.isLaunchAtLoginEnabled {
+                try LaunchAtLoginManager.disable()
+            } else {
+                try LaunchAtLoginManager.enable()
+            }
+        } catch {
+            self.lastError = "Launch at login failed: \(error.localizedDescription)"
+        }
+        self.isLaunchAtLoginEnabled = LaunchAtLoginManager.isEnabled
     }
 }
