@@ -1,6 +1,6 @@
 cask "burnrate" do
-  version "0.1.0"
-  sha256 "963832f23445bc79846d770c4d47d4b3c50ec1ac22d13f6d06ffafe9671f366b"
+  version "0.1.1"
+  sha256 "b778feaacd3045111e7b3b5a138c297cb084961e72797f89eb7bb65caaf85276"
 
   url "https://github.com/kennykankush/burnrate/releases/download/v#{version}/burnrate-#{version}.zip"
   name "burnrate"
