@@ -1,4 +1,4 @@
-import BwernrateCore
+import BurnrateCore
 import SwiftUI
 
 enum DesignSystem {

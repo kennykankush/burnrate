@@ -1,5 +1,5 @@
 import AppKit
-import BwernrateCore
+import BurnrateCore
 import SwiftUI
 
 struct MenuBarRootView: View {
@@ -16,6 +16,12 @@ struct MenuBarRootView: View {
                 if let snapshot = self.model.selectedSnapshot {
                     ProviderSwitch(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
                     ProviderCard(snapshot: snapshot)
+                    if let context = snapshot.workContext {
+                        WorkContextCard(context: context)
+                    }
+                    if let session = snapshot.codexSession {
+                        CodexTelemetryCard(session: session)
+                    }
                     TodayCard(snapshot: snapshot)
                     MiniProviderRow(overview: self.model.overview)
                 } else {
@@ -64,7 +70,7 @@ private struct HeaderView: View {
                 }
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("bwernrate")
+                Text("burnrate")
                     .font(DesignSystem.Typography.title)
                     .foregroundStyle(DesignSystem.Colors.primaryText)
                 Text(self.subtitle)
@@ -144,7 +150,7 @@ private struct ProviderCard: View {
     let snapshot: ProviderUsageSnapshot
 
     private var tone: UsageTone {
-        UsageTone(percent: self.snapshot.highestUsedPercent)
+        UsageTone(percent: self.snapshot.primaryUsedPercent)
     }
 
     var body: some View {
@@ -180,11 +186,11 @@ private struct ProviderCard: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 0) {
-                    Text("\(Int(self.snapshot.highestUsedPercent.rounded()))%")
+                    Text("\(Int(self.snapshot.primaryUsedPercent.rounded()))%")
                         .font(.system(size: 25, weight: .semibold, design: .default))
                         .foregroundStyle(DesignSystem.Colors.primaryText)
                         .monospacedDigit()
-                    Text(self.tone.label)
+                    Text(self.primaryWindowLabel)
                         .font(DesignSystem.Typography.caption)
                         .foregroundStyle(self.tone.color)
                 }
@@ -197,9 +203,9 @@ private struct ProviderCard: View {
             }
 
             HStack(spacing: 7) {
-                CompactMetric(title: "Requests", value: "\(self.snapshot.today.requests)")
+                CompactMetric(title: self.requestTitle, value: "\(self.snapshot.today.requests)")
                 CompactMetric(title: "Tokens", value: DisplayText.compact(self.snapshot.today.totalTokens))
-                CompactMetric(title: "Spend", value: DisplayText.money(self.snapshot.today.spend?.used, currency: self.snapshot.today.spend?.currencyCode))
+                CompactMetric(title: self.thirdMetricTitle, value: self.thirdMetricValue)
             }
         }
         .padding(12)
@@ -210,6 +216,28 @@ private struct ProviderCard: View {
         let account = self.snapshot.accountLabel ?? "Local account"
         guard let project = self.snapshot.projectLabel else { return account }
         return "\(account) / \(project)"
+    }
+
+    private var primaryWindowLabel: String {
+        guard let title = self.snapshot.primaryWindow?.title else { return self.tone.label }
+        if title == "5h" { return "5h burst" }
+        return title.lowercased()
+    }
+
+    private var requestTitle: String {
+        self.snapshot.kind == .codex ? "Turns" : "Requests"
+    }
+
+    private var thirdMetricTitle: String {
+        if self.snapshot.kind == .codex, self.snapshot.codexSession != nil { return "Cache" }
+        return "Spend"
+    }
+
+    private var thirdMetricValue: String {
+        if let session = self.snapshot.codexSession {
+            return DisplayText.compact(session.cachedInputTokens)
+        }
+        return DisplayText.money(self.snapshot.today.spend?.used, currency: self.snapshot.today.spend?.currencyCode)
     }
 }
 
@@ -352,7 +380,7 @@ private struct MiniProviderCard: View {
     let snapshot: ProviderUsageSnapshot
 
     private var tone: UsageTone {
-        UsageTone(percent: self.snapshot.highestUsedPercent)
+        UsageTone(percent: self.snapshot.primaryUsedPercent)
     }
 
     var body: some View {
@@ -363,15 +391,15 @@ private struct MiniProviderCard: View {
                     .foregroundStyle(DesignSystem.Colors.secondaryText)
                     .lineLimit(1)
                 Spacer()
-                Text("\(Int(self.snapshot.highestUsedPercent.rounded()))%")
+                Text("\(Int(self.snapshot.primaryUsedPercent.rounded()))%")
                     .font(DesignSystem.Typography.number)
                     .foregroundStyle(DesignSystem.Colors.primaryText)
                     .monospacedDigit()
             }
 
-            MeterBar(tone: self.tone, usedPercent: self.snapshot.highestUsedPercent)
+            MeterBar(tone: self.tone, usedPercent: self.snapshot.primaryUsedPercent)
 
-            Text(DisplayText.resetShort(self.snapshot.nextResetAt))
+            Text(DisplayText.resetShort(self.snapshot.primaryResetAt))
                 .font(DesignSystem.Typography.caption)
                 .foregroundStyle(DesignSystem.Colors.tertiaryText)
                 .lineLimit(1)
@@ -383,6 +411,200 @@ private struct MiniProviderCard: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(DesignSystem.Colors.stroke.opacity(0.65))
         }
+    }
+}
+
+private struct WorkContextCard: View {
+    let context: WorkContextSnapshot
+
+    private var tone: UsageTone {
+        UsageTone(percent: self.context.contextUsedPercent)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Currently working under")
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    Text(self.directoryName)
+                        .font(.system(size: 14, weight: .semibold, design: .default))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                        .lineLimit(1)
+                    if let model = self.context.modelName {
+                        Text(model)
+                            .font(DesignSystem.Typography.caption)
+                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text("\(Int(self.context.contextRemainingPercent.rounded()))%")
+                        .font(.system(size: 22, weight: .semibold, design: .default))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                        .monospacedDigit()
+                    Text("context left")
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundStyle(self.tone.color)
+                }
+            }
+
+            MeterBar(tone: self.tone, usedPercent: self.context.contextUsedPercent)
+
+            HStack {
+                Text("\(DisplayText.compact(self.context.contextUsedTokens)) / \(DisplayText.compact(self.context.contextWindowTokens)) used")
+                Spacer()
+                Text(DisplayText.relative(self.context.updatedAt))
+            }
+            .font(DesignSystem.Typography.caption)
+            .foregroundStyle(DesignSystem.Colors.tertiaryText)
+
+            HStack(spacing: 7) {
+                CompactMetric(title: "Last turn", value: DisplayText.compact(self.context.nextMessageTokens ?? 0))
+                CompactMetric(title: "Burn", value: DisplayText.compact(self.context.averageGrowthTokens ?? 0))
+                CompactMetric(title: "Msgs left", value: self.messagesRemainingText)
+            }
+        }
+        .padding(12)
+        .premiumCard(accent: self.tone.color, includeGlow: false)
+    }
+
+    private var directoryName: String {
+        guard let directory = self.context.directory else { return "Codex session" }
+        return URL(fileURLWithPath: directory).lastPathComponent
+    }
+
+    private var messagesRemainingText: String {
+        guard let count = self.context.estimatedMessagesRemaining else { return "--" }
+        if count > 999 { return "999+" }
+        return "\(count)"
+    }
+}
+
+private struct CodexTelemetryCard: View {
+    let session: CodexSessionStats
+
+    var body: some View {
+        VStack(spacing: 9) {
+            HStack(alignment: .center, spacing: 9) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(self.title)
+                        .font(.system(size: 13, weight: .semibold, design: .default))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                        .lineLimit(1)
+                    Text(self.metaLine)
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                StatusPill(text: self.activityText, tone: self.statusTone)
+            }
+
+            HStack(spacing: 6) {
+                TelemetryMetric(
+                    title: "Cache",
+                    value: DisplayText.compact(self.session.cachedInputTokens),
+                    detail: "\(Int(self.session.cacheSharePercent.rounded()))% input")
+                TelemetryMetric(
+                    title: "Reason",
+                    value: DisplayText.compact(self.session.reasoningOutputTokens),
+                    detail: "\(Int(self.session.reasoningSharePercent.rounded()))% output")
+                TelemetryMetric(
+                    title: "Tools",
+                    value: "\(self.session.toolCalls)",
+                    detail: "\(self.session.shellCommands) shell")
+                TelemetryMetric(
+                    title: "Signals",
+                    value: "\(self.session.patchEvents + self.session.webSearches + self.session.compactions)",
+                    detail: "\(self.session.errors) errors")
+            }
+        }
+        .padding(10)
+        .premiumCard(accent: DesignSystem.Colors.accent(for: .codex), includeGlow: false)
+    }
+
+    private var title: String {
+        self.session.threadTitle?.isEmpty == false ? self.session.threadTitle! : "Codex thread"
+    }
+
+    private var metaLine: String {
+        let parts = [
+            self.session.gitBranch.map { "branch \($0)" },
+            self.session.reasoningEffort.map { "effort \($0)" },
+            self.session.cliVersion.map { "Codex \($0)" },
+        ].compactMap { $0 }
+        return parts.isEmpty ? "local session telemetry" : parts.joined(separator: " / ")
+    }
+
+    private var activityText: String {
+        guard let lastActivityAt = self.session.lastActivityAt else { return "local" }
+        let seconds = max(0, Int(Date().timeIntervalSince(lastActivityAt)))
+        if seconds < 120 { return "live" }
+        if seconds < 3_600 { return "\(seconds / 60)m idle" }
+        return "\(seconds / 3_600)h idle"
+    }
+
+    private var statusTone: UsageTone {
+        guard let lastActivityAt = self.session.lastActivityAt else { return .watch }
+        let seconds = max(0, Int(Date().timeIntervalSince(lastActivityAt)))
+        if self.session.errors > 0 { return .tight }
+        if seconds > 900 { return .watch }
+        return .calm
+    }
+}
+
+private struct StatusPill: View {
+    let text: String
+    let tone: UsageTone
+
+    var body: some View {
+        Text(self.text)
+            .font(.system(size: 9, weight: .semibold, design: .default))
+            .foregroundStyle(self.tone.color)
+            .padding(.horizontal, 7)
+            .frame(height: 20)
+            .background(self.tone.color.opacity(0.12), in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(self.tone.color.opacity(0.26))
+            }
+    }
+}
+
+private struct TelemetryMetric: View {
+    let title: String
+    let value: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(self.title.uppercased())
+                .font(.system(size: 9, weight: .medium, design: .default))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                .lineLimit(1)
+            Text(self.value)
+                .font(.system(size: 12, weight: .semibold, design: .default))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .monospacedDigit()
+            Text(self.detail)
+                .font(.system(size: 9, weight: .regular, design: .default))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 7)
+        .frame(height: 44)
+        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.032))
     }
 }
 
@@ -521,6 +743,16 @@ private enum DisplayText {
         guard let text = reset(date) else { return "--" }
         return text.replacingOccurrences(of: "resets in ", with: "")
             .replacingOccurrences(of: "resets ", with: "")
+    }
+
+    static func relative(_ date: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(date)))
+        if seconds < 60 { return "just now" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        return "\(hours / 24)d ago"
     }
 
     static func compact(_ value: Int) -> String {

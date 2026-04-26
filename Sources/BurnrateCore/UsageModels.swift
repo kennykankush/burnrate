@@ -56,6 +56,8 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
     public let windows: [UsageWindow]
     public let today: DailyUsageStats
     public let modelMix: [ModelUsageShare]
+    public let workContext: WorkContextSnapshot?
+    public let codexSession: CodexSessionStats?
     public let creditBalance: Double?
     public let extraSpend: ProviderSpend?
     public let streakDays: Int
@@ -69,6 +71,8 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         windows: [UsageWindow],
         today: DailyUsageStats = .empty,
         modelMix: [ModelUsageShare] = [],
+        workContext: WorkContextSnapshot? = nil,
+        codexSession: CodexSessionStats? = nil,
         creditBalance: Double?,
         extraSpend: ProviderSpend?,
         streakDays: Int = 0,
@@ -81,6 +85,8 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         self.windows = windows
         self.today = today
         self.modelMix = modelMix
+        self.workContext = workContext
+        self.codexSession = codexSession
         self.creditBalance = creditBalance
         self.extraSpend = extraSpend
         self.streakDays = streakDays
@@ -89,6 +95,18 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
 
     public var highestUsedPercent: Double {
         self.windows.map(\.usedPercent).max() ?? 0
+    }
+
+    public var primaryWindow: UsageWindow? {
+        self.windows.first
+    }
+
+    public var primaryUsedPercent: Double {
+        self.primaryWindow?.usedPercent ?? self.highestUsedPercent
+    }
+
+    public var primaryResetAt: Date? {
+        self.primaryWindow?.resetsAt
     }
 
     public var mostPressedWindow: UsageWindow? {
@@ -161,6 +179,154 @@ public struct ModelUsageShare: Codable, Equatable, Identifiable, Sendable {
     public init(modelName: String, percent: Double) {
         self.modelName = modelName
         self.percent = min(100, max(0, percent))
+    }
+}
+
+public struct CodexSessionStats: Codable, Equatable, Sendable {
+    public let threadTitle: String?
+    public let gitBranch: String?
+    public let reasoningEffort: String?
+    public let cliVersion: String?
+    public let source: String?
+    public let approvalMode: String?
+    public let sandboxLabel: String?
+    public let sessionStartedAt: Date?
+    public let lastActivityAt: Date?
+    public let totalInputTokens: Int
+    public let cachedInputTokens: Int
+    public let totalOutputTokens: Int
+    public let reasoningOutputTokens: Int
+    public let lastInputTokens: Int
+    public let lastOutputTokens: Int
+    public let tokenEvents: Int
+    public let toolCalls: Int
+    public let shellCommands: Int
+    public let patchEvents: Int
+    public let webSearches: Int
+    public let errors: Int
+    public let compactions: Int
+
+    public var totalSessionTokens: Int {
+        self.totalInputTokens + self.totalOutputTokens
+    }
+
+    public var lastTurnTokens: Int {
+        self.lastInputTokens + self.lastOutputTokens
+    }
+
+    public var cacheSharePercent: Double {
+        guard self.totalInputTokens > 0 else { return 0 }
+        return min(100, max(0, Double(self.cachedInputTokens) / Double(self.totalInputTokens) * 100))
+    }
+
+    public var reasoningSharePercent: Double {
+        guard self.totalOutputTokens > 0 else { return 0 }
+        return min(100, max(0, Double(self.reasoningOutputTokens) / Double(self.totalOutputTokens) * 100))
+    }
+
+    public var activeMinutes: Int {
+        guard let sessionStartedAt, let lastActivityAt else { return 0 }
+        return max(0, Int(lastActivityAt.timeIntervalSince(sessionStartedAt) / 60))
+    }
+
+    public init(
+        threadTitle: String?,
+        gitBranch: String?,
+        reasoningEffort: String?,
+        cliVersion: String?,
+        source: String?,
+        approvalMode: String?,
+        sandboxLabel: String?,
+        sessionStartedAt: Date?,
+        lastActivityAt: Date?,
+        totalInputTokens: Int,
+        cachedInputTokens: Int,
+        totalOutputTokens: Int,
+        reasoningOutputTokens: Int,
+        lastInputTokens: Int,
+        lastOutputTokens: Int,
+        tokenEvents: Int,
+        toolCalls: Int,
+        shellCommands: Int,
+        patchEvents: Int,
+        webSearches: Int,
+        errors: Int,
+        compactions: Int)
+    {
+        self.threadTitle = threadTitle
+        self.gitBranch = gitBranch
+        self.reasoningEffort = reasoningEffort
+        self.cliVersion = cliVersion
+        self.source = source
+        self.approvalMode = approvalMode
+        self.sandboxLabel = sandboxLabel
+        self.sessionStartedAt = sessionStartedAt
+        self.lastActivityAt = lastActivityAt
+        self.totalInputTokens = totalInputTokens
+        self.cachedInputTokens = cachedInputTokens
+        self.totalOutputTokens = totalOutputTokens
+        self.reasoningOutputTokens = reasoningOutputTokens
+        self.lastInputTokens = lastInputTokens
+        self.lastOutputTokens = lastOutputTokens
+        self.tokenEvents = tokenEvents
+        self.toolCalls = toolCalls
+        self.shellCommands = shellCommands
+        self.patchEvents = patchEvents
+        self.webSearches = webSearches
+        self.errors = errors
+        self.compactions = compactions
+    }
+}
+
+public struct WorkContextSnapshot: Codable, Equatable, Sendable {
+    public let sessionId: String?
+    public let directory: String?
+    public let modelName: String?
+    public let contextUsedTokens: Int
+    public let contextWindowTokens: Int
+    public let averageGrowthTokens: Int?
+    public let nextMessageTokens: Int?
+    public let userMessageCount: Int
+    public let updatedAt: Date
+
+    public var contextUsedPercent: Double {
+        guard self.contextWindowTokens > 0 else { return 0 }
+        return min(100, max(0, Double(self.contextUsedTokens) / Double(self.contextWindowTokens) * 100))
+    }
+
+    public var contextRemainingPercent: Double {
+        max(0, 100 - self.contextUsedPercent)
+    }
+
+    public var contextRemainingTokens: Int {
+        max(0, self.contextWindowTokens - self.contextUsedTokens)
+    }
+
+    public var estimatedMessagesRemaining: Int? {
+        guard let averageGrowthTokens, averageGrowthTokens > 0 else { return nil }
+        return max(0, self.contextRemainingTokens / averageGrowthTokens)
+    }
+
+    public init(
+        sessionId: String?,
+        directory: String?,
+        modelName: String?,
+        contextUsedTokens: Int,
+        contextWindowTokens: Int,
+        averageGrowthTokens: Int?,
+        nextMessageTokens: Int?,
+        userMessageCount: Int,
+        updatedAt: Date)
+    {
+        self.sessionId = sessionId
+        self.directory = directory
+        self.modelName = modelName
+        self.contextUsedTokens = contextUsedTokens
+        self.contextWindowTokens = contextWindowTokens
+        self.averageGrowthTokens = averageGrowthTokens
+        self.nextMessageTokens = nextMessageTokens
+        self.userMessageCount = userMessageCount
+        self.updatedAt = updatedAt
     }
 }
 

@@ -1,8 +1,8 @@
-import BwernrateCore
+import BurnrateCore
 import SwiftUI
 
 @main
-struct BwernrateApp: App {
+struct BurnrateApp: App {
     @State private var model = MenuBarModel()
 
     var body: some Scene {

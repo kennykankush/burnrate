@@ -1,4 +1,4 @@
-import BwernrateCore
+import BurnrateCore
 import Foundation
 import Observation
 
@@ -12,6 +12,7 @@ final class MenuBarModel {
 
     private let source = UsageSnapshotSource()
     private var hasStarted = false
+    private var refreshTask: Task<Void, Never>?
 
     var selectedSnapshot: ProviderUsageSnapshot? {
         self.overview.snapshot(for: self.selectedProvider) ?? self.overview.snapshots.first
@@ -19,14 +20,19 @@ final class MenuBarModel {
 
     var menuBarText: String {
         guard !self.overview.snapshots.isEmpty else { return "--" }
-        return "\(Int(self.overview.highestUsedPercent.rounded()))%"
+        let snapshot = self.overview.snapshot(for: self.selectedProvider) ?? self.overview.snapshots.first
+        return "\(Int((snapshot?.primaryUsedPercent ?? 0).rounded()))%"
     }
 
     func start() {
         guard !self.hasStarted else { return }
         self.hasStarted = true
-        Task {
+        self.refreshTask = Task {
             await self.refresh()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                await self.refresh()
+            }
         }
     }
 
@@ -49,4 +55,3 @@ final class MenuBarModel {
         }
     }
 }
-

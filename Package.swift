@@ -2,20 +2,20 @@
 import PackageDescription
 
 let package = Package(
-    name: "bwernrate",
+    name: "burnrate",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "bwernrate", targets: ["Bwernrate"]),
+        .executable(name: "burnrate", targets: ["Burnrate"]),
     ],
     targets: [
         .target(
-            name: "BwernrateCore",
-            path: "Sources/BwernrateCore"
+            name: "BurnrateCore",
+            path: "Sources/BurnrateCore"
         ),
         .executableTarget(
-            name: "Bwernrate",
-            dependencies: ["BwernrateCore"],
-            path: "Sources/Bwernrate"
+            name: "Burnrate",
+            dependencies: ["BurnrateCore"],
+            path: "Sources/Burnrate"
         ),
     ]
 )
