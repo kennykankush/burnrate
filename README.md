@@ -12,9 +12,16 @@ Live OAuth windows. Per-session quality grades. Cache-hit savings. 38 pattern ca
 
 Grab the latest `.zip` from [Releases](https://github.com/kennykankush/burnrate/releases), unzip, and drag `burnrate.app` into `/Applications`.
 
-> **First-launch quirk** — burnrate is signed with an Apple Development certificate (not yet notarised), so on first launch macOS will say "burnrate.app cannot be opened because the developer cannot be verified."
+> **First-launch quirk** — burnrate is signed with an Apple Development certificate (not yet notarised). On first launch, macOS will block it with "Apple could not verify burnrate is free of malware."
 >
-> Fix: **right-click** `burnrate.app` in `/Applications`, choose **Open**, then click **Open** in the warning dialog. macOS remembers the choice.
+> Fix:
+> 1. Click **Done** on the dialog (NOT "Move to Trash")
+> 2. Open **System Settings** → **Privacy & Security**
+> 3. Scroll down, find the burnrate entry, click **Open Anyway**
+> 4. Authenticate with Touch ID or your password
+> 5. Click **Open** on the confirmation dialog
+>
+> macOS remembers the choice. Future launches just work.
 
 ### Homebrew
 

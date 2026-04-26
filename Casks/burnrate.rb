@@ -19,14 +19,17 @@ cask "burnrate" do
   # delete this caveats block.
   caveats <<~EOS
     burnrate is currently signed with an Apple Development certificate
-    (not yet notarised). On first launch, macOS will refuse to open it.
+    (not yet notarised). On first launch, macOS will refuse to open it
+    and show "Apple could not verify burnrate is free of malware".
 
     To open it:
-      1. Right-click burnrate in /Applications
-      2. Choose "Open"
-      3. Click "Open" in the warning dialog
+      1. Click "Done" on the dialog (NOT "Move to Trash")
+      2. Open System Settings, then Privacy and Security
+      3. Scroll down, find the burnrate entry, click "Open Anyway"
+      4. Authenticate with Touch ID or your password
+      5. Click "Open" on the new confirmation dialog
 
-    macOS remembers this choice — subsequent launches work normally.
+    macOS remembers this choice. Future launches work normally.
   EOS
 
   zap trash: [
