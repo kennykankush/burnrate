@@ -7,3 +7,12 @@ research/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# Local research notes
+/research
+
+# Release artefacts (uploaded to GitHub Releases, not committed)
+/dist
+
+# Branding source (kept local only)
+/branding

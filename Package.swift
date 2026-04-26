@@ -15,7 +15,10 @@ let package = Package(
         .executableTarget(
             name: "Burnrate",
             dependencies: ["BurnrateCore"],
-            path: "Sources/Burnrate"
+            path: "Sources/Burnrate",
+            resources: [
+                .process("Resources"),
+            ]
         ),
     ]
 )

@@ -12,23 +12,44 @@ struct MenuBarRootView: View {
             Divider()
                 .overlay(DesignSystem.Colors.stroke)
 
-            VStack(spacing: 10) {
-                if let snapshot = self.model.selectedSnapshot {
-                    ProviderSwitch(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
-                    ProviderCard(snapshot: snapshot)
-                    if let context = snapshot.workContext {
-                        WorkContextCard(context: context)
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 10) {
+                    if let snapshot = self.model.selectedSnapshot {
+                        ProviderSwitch(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
+                        ProviderCard(snapshot: snapshot)
+
+                        switch snapshot.kind {
+                        case .codex:
+                            if let insight = snapshot.codexSession?.insight {
+                                CodexAdvisorCard(insight: insight)
+                            }
+                            if let memory = snapshot.codexMemory {
+                                CodexMemoryCard(memory: memory)
+                            }
+                            if let context = snapshot.workContext {
+                                WorkContextCard(context: context)
+                            }
+                            if let session = snapshot.codexSession {
+                                CodexTelemetryCard(session: session)
+                                if !session.flightEvents.isEmpty {
+                                    CodexFlightRecorderCard(session: session)
+                                }
+                            }
+                        case .claude:
+                            ClaudeContentStack(snapshot: snapshot)
+                        }
+
+                        if snapshot.kind != .claude {
+                            TodayCard(snapshot: snapshot)
+                        }
+                        MiniProviderRow(overview: self.model.overview)
+                    } else {
+                        EmptyStateView(isRefreshing: self.model.isRefreshing, error: self.model.lastError)
                     }
-                    if let session = snapshot.codexSession {
-                        CodexTelemetryCard(session: session)
-                    }
-                    TodayCard(snapshot: snapshot)
-                    MiniProviderRow(overview: self.model.overview)
-                } else {
-                    EmptyStateView(isRefreshing: self.model.isRefreshing, error: self.model.lastError)
                 }
+                .padding(DesignSystem.Layout.contentPadding)
             }
-            .padding(DesignSystem.Layout.contentPadding)
+            .frame(maxHeight: DesignSystem.Layout.scrollMaxHeight)
 
             Divider()
                 .overlay(DesignSystem.Colors.stroke)
@@ -59,15 +80,8 @@ private struct HeaderView: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-                .frame(width: 24, height: 24)
-                .glassSurface(cornerRadius: 7, tint: .white.opacity(0.10))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .stroke(DesignSystem.Colors.stroke)
-                }
+            BrandMark(mark: .icon3D, size: 26)
+                .shadow(color: Brand.Palette.deepPurple.opacity(0.45), radius: 6, y: 2)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("burnrate")
@@ -120,8 +134,7 @@ private struct ProviderSwitch: View {
                     self.selectedProvider = provider
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: provider.symbolName)
-                            .font(.system(size: 10, weight: .semibold))
+                        ProviderMark(kind: provider, size: 12, renderingMode: .template)
                         Text(provider.displayName)
                             .font(DesignSystem.Typography.label)
                             .lineLimit(1)
@@ -156,6 +169,18 @@ private struct ProviderCard: View {
     var body: some View {
         VStack(spacing: 11) {
             HStack(alignment: .center, spacing: 10) {
+                ProviderMark(kind: self.snapshot.kind, size: 22, renderingMode: .original)
+                    .foregroundStyle(DesignSystem.Colors.accent(for: self.snapshot.kind))
+                    .padding(7)
+                    .background {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .fill(DesignSystem.Colors.accent(for: self.snapshot.kind).opacity(0.14))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(DesignSystem.Colors.accent(for: self.snapshot.kind).opacity(0.32))
+                    }
+
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(self.snapshot.kind.displayName)
@@ -268,25 +293,6 @@ private struct CompactLimitRow: View {
             .font(DesignSystem.Typography.caption)
             .foregroundStyle(DesignSystem.Colors.tertiaryText)
         }
-    }
-}
-
-private struct MeterBar: View {
-    let tone: UsageTone
-    let usedPercent: Double
-
-    var body: some View {
-        GeometryReader { proxy in
-            let fillWidth = max(4, proxy.size.width * min(1, max(0, self.usedPercent / 100)))
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.white.opacity(0.08))
-                Capsule()
-                    .fill(self.tone.color)
-                    .frame(width: fillWidth)
-            }
-        }
-        .frame(height: 5)
     }
 }
 
@@ -411,6 +417,162 @@ private struct MiniProviderCard: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(DesignSystem.Colors.stroke.opacity(0.65))
         }
+    }
+}
+
+private struct CodexAdvisorCard: View {
+    let insight: CodexSessionInsight
+
+    private var tone: UsageTone {
+        UsageTone(health: self.insight.health)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: self.iconName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(self.tone.color)
+                    .frame(width: 24, height: 24)
+                    .glassSurface(cornerRadius: 7, tint: self.tone.color.opacity(0.08))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(self.insight.health.title)
+                            .font(.system(size: 14, weight: .semibold, design: .default))
+                            .foregroundStyle(DesignSystem.Colors.primaryText)
+                            .lineLimit(1)
+
+                        Text("Codex advisor")
+                            .font(.system(size: 9, weight: .medium, design: .default))
+                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                            .padding(.horizontal, 6)
+                            .frame(height: 17)
+                            .background(Color.white.opacity(0.08), in: Capsule())
+                    }
+
+                    Text(self.insight.recommendation)
+                        .font(DesignSystem.Typography.body)
+                        .foregroundStyle(DesignSystem.Colors.secondaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 4)
+            }
+
+            HStack(spacing: 6) {
+                AdvisorMetric(title: "Why", value: self.insight.primaryDriver, detail: self.insight.driverDetail)
+                AdvisorMetric(title: "Forecast", value: self.insight.forecast, detail: self.insight.resetPlan)
+            }
+
+            HStack(spacing: 6) {
+                TinyMeterMetric(
+                    title: "Last turn",
+                    value: "\(Int(self.insight.lastTurnSharePercent.rounded()))%",
+                    percent: self.insight.lastTurnSharePercent,
+                    tone: self.tone)
+                TinyMeterMetric(
+                    title: "Burn/min",
+                    value: DisplayText.compact(self.insight.tokensPerMinute),
+                    percent: min(100, Double(self.insight.tokensPerMinute) / 650),
+                    tone: self.tone)
+            }
+        }
+        .padding(10)
+        .premiumCard(accent: self.tone.color, includeGlow: true)
+    }
+
+    private var iconName: String {
+        switch self.insight.health {
+        case .efficient: "bolt.badge.checkmark"
+        case .healthy: "checkmark.seal"
+        case .watch: "eye"
+        case .tight: "exclamationmark.triangle"
+        case .stuck: "wrench.and.screwdriver"
+        }
+    }
+}
+
+private struct AdvisorMetric: View {
+    let title: String
+    let value: String
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(self.title.uppercased())
+                .font(.system(size: 9, weight: .medium, design: .default))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+            Text(self.value)
+                .font(.system(size: 12, weight: .semibold, design: .default))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            Text(self.detail)
+                .font(.system(size: 9, weight: .regular, design: .default))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(minHeight: 56, alignment: .topLeading)
+        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.035))
+    }
+}
+
+private struct TinyMeterMetric: View {
+    let title: String
+    let value: String
+    let percent: Double
+    let tone: UsageTone
+
+    var body: some View {
+        VStack(spacing: 5) {
+            HStack {
+                Text(self.title.uppercased())
+                    .font(.system(size: 9, weight: .medium, design: .default))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                Spacer()
+                Text(self.value)
+                    .font(DesignSystem.Typography.number)
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                    .monospacedDigit()
+            }
+            MeterBar(tone: self.tone, usedPercent: self.percent)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity)
+        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.032))
+    }
+}
+
+private struct CodexMemoryCard: View {
+    let memory: CodexProjectMemory
+
+    var body: some View {
+        HStack(spacing: 0) {
+            DetailColumn(title: "Project", value: self.memory.projectName, detail: "\(self.memory.sessionCount) sessions")
+            SoftDivider()
+            DetailColumn(title: "Avg turn", value: DisplayText.compact(self.memory.averageTurnTokens), detail: "tokens")
+            SoftDivider()
+            DetailColumn(title: "Burn index", value: self.burnMultiple, detail: self.burnDetail)
+        }
+        .padding(.vertical, 10)
+        .premiumCard(accent: DesignSystem.Colors.accent(for: .codex), includeGlow: false)
+    }
+
+    private var burnMultiple: String {
+        String(format: "%.1fx", self.memory.relativeBurnMultiple)
+    }
+
+    private var burnDetail: String {
+        if self.memory.relativeBurnMultiple >= 1.5 { return "above normal" }
+        if self.memory.relativeBurnMultiple <= 0.75 { return "below normal" }
+        return "normal"
     }
 }
 
@@ -560,6 +722,91 @@ private struct CodexTelemetryCard: View {
     }
 }
 
+private struct CodexFlightRecorderCard: View {
+    let session: CodexSessionStats
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Flight recorder")
+                    .font(.system(size: 13, weight: .semibold, design: .default))
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                Spacer()
+                if let biggest = self.session.biggestBurnEvent?.tokenImpact {
+                    Text("peak \(DisplayText.compact(biggest))")
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                        .monospacedDigit()
+                }
+            }
+
+            VStack(spacing: 5) {
+                ForEach(self.session.flightEvents.prefix(4)) { event in
+                    FlightEventRow(event: event)
+                }
+            }
+        }
+        .padding(10)
+        .premiumCard(accent: DesignSystem.Colors.accent(for: .codex), includeGlow: false)
+    }
+}
+
+private struct FlightEventRow: View {
+    let event: CodexFlightEvent
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: self.symbolName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(self.color)
+                .frame(width: 18, height: 18)
+                .background(self.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(self.event.title)
+                    .font(DesignSystem.Typography.label)
+                    .foregroundStyle(DesignSystem.Colors.secondaryText)
+                    .lineLimit(1)
+                Text(self.event.detail)
+                    .font(.system(size: 9, weight: .regular, design: .default))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if let tokenImpact = self.event.tokenImpact {
+                Text(DisplayText.compact(tokenImpact))
+                    .font(DesignSystem.Typography.number)
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.026))
+    }
+
+    private var symbolName: String {
+        switch self.event.kind {
+        case .tokenSpike: "flame"
+        case .shell: "terminal"
+        case .patch: "hammer"
+        case .web: "globe"
+        case .error: "exclamationmark.triangle"
+        case .compaction: "arrow.down.forward.and.arrow.up.backward"
+        }
+    }
+
+    private var color: Color {
+        switch self.event.kind {
+        case .error: DesignSystem.Colors.danger
+        case .tokenSpike, .compaction: DesignSystem.Colors.warning
+        default: DesignSystem.Colors.accent(for: .codex)
+        }
+    }
+}
+
 private struct StatusPill: View {
     let text: String
     let tone: UsageTone
@@ -632,12 +879,36 @@ private struct FooterView: View {
     @Bindable var model: MenuBarModel
 
     var body: some View {
-        HStack {
-            Text(self.updatedText)
+        HStack(spacing: 8) {
+            Text(self.leadingText)
                 .font(DesignSystem.Typography.caption)
                 .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                .lineLimit(1)
 
             Spacer()
+
+            if self.shouldShowInsights {
+                Button {
+                    self.openInsightsReport()
+                } label: {
+                    HStack(spacing: 3) {
+                        Text("Insights")
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                }
+                .font(DesignSystem.Typography.caption)
+                .buttonStyle(.plain)
+                .foregroundStyle(DesignSystem.Colors.secondaryText)
+                .help("Open the cross-session Claude Code Insights HTML report")
+            }
+
+            Button(self.model.alertMode.title) {
+                self.model.cycleAlertMode()
+            }
+            .font(DesignSystem.Typography.caption)
+            .buttonStyle(.plain)
+            .foregroundStyle(DesignSystem.Colors.secondaryText)
 
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
@@ -650,11 +921,33 @@ private struct FooterView: View {
         .padding(.vertical, 8)
     }
 
+    private var leadingText: String {
+        if self.model.selectedProvider == .claude,
+           let snap = self.model.overview.snapshot(for: .claude),
+           let day = snap.claudeAggregate?.daysSinceFirstSession
+        {
+            return "day \(day) · " + self.updatedText
+        }
+        return self.updatedText
+    }
+
     private var updatedText: String {
         guard !self.model.overview.snapshots.isEmpty else { return "not refreshed" }
         let seconds = max(0, Int(Date().timeIntervalSince(self.model.overview.updatedAt)))
         if seconds < 60 { return "updated just now" }
         return "updated \(seconds / 60)m ago"
+    }
+
+    private var shouldShowInsights: Bool {
+        guard self.model.selectedProvider == .claude else { return false }
+        let path = ("~/.claude/usage-data/report.html" as NSString).expandingTildeInPath
+        return FileManager.default.fileExists(atPath: path)
+    }
+
+    private func openInsightsReport() {
+        let path = ("~/.claude/usage-data/report.html" as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 }
 
@@ -694,174 +987,3 @@ private struct GlassBackdrop: View {
     }
 }
 
-private enum UsageTone {
-    case calm
-    case watch
-    case tight
-
-    init(percent: Double) {
-        switch percent {
-        case 0..<55:
-            self = .calm
-        case 55..<82:
-            self = .watch
-        default:
-            self = .tight
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .calm: "Healthy"
-        case .watch: "Moderate"
-        case .tight: "Tight"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .calm: DesignSystem.Colors.success
-        case .watch: DesignSystem.Colors.warning
-        case .tight: DesignSystem.Colors.danger
-        }
-    }
-}
-
-private enum DisplayText {
-    static func reset(_ date: Date?) -> String? {
-        guard let date else { return nil }
-        let remaining = date.timeIntervalSinceNow
-        guard remaining > 0 else { return "resets now" }
-        let minutes = Int(remaining / 60)
-        if minutes < 60 { return "resets in \(minutes)m" }
-        let hours = minutes / 60
-        if hours < 24 { return "resets in \(hours)h" }
-        return "resets in \(hours / 24)d"
-    }
-
-    static func resetShort(_ date: Date?) -> String {
-        guard let text = reset(date) else { return "--" }
-        return text.replacingOccurrences(of: "resets in ", with: "")
-            .replacingOccurrences(of: "resets ", with: "")
-    }
-
-    static func relative(_ date: Date) -> String {
-        let seconds = max(0, Int(Date().timeIntervalSince(date)))
-        if seconds < 60 { return "just now" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes)m ago" }
-        let hours = minutes / 60
-        if hours < 24 { return "\(hours)h ago" }
-        return "\(hours / 24)d ago"
-    }
-
-    static func compact(_ value: Int) -> String {
-        switch value {
-        case 1_000_000...:
-            return String(format: "%.1fM", Double(value) / 1_000_000)
-        case 10_000...:
-            return "\(value / 1_000)K"
-        case 1_000...:
-            return String(format: "%.1fK", Double(value) / 1_000)
-        default:
-            return "\(value)"
-        }
-    }
-
-    static func minutes(_ value: Int) -> String {
-        if value < 60 { return "\(value)m" }
-        let hours = value / 60
-        let minutes = value % 60
-        return minutes == 0 ? "\(hours)h" : "\(hours)h \(minutes)m"
-    }
-
-    static func money(_ value: Double?, currency: String?) -> String {
-        guard let value else { return "--" }
-        return money(value, currency: currency ?? "USD")
-    }
-
-    static func money(_ value: Double, currency: String) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .currency
-        formatter.currencyCode = currency
-        formatter.maximumFractionDigits = value.rounded() == value ? 0 : 2
-        return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
-    }
-}
-
-private extension View {
-    func premiumCard(accent: Color, includeGlow: Bool = true) -> some View {
-        self
-            .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.18),
-                                Color.white.opacity(0.075),
-                                Color.white.opacity(0.040),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing))
-                    .overlay(alignment: .topLeading) {
-                        if includeGlow {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(accent.opacity(0.10))
-                                .frame(width: 118, height: 42)
-                                .offset(x: -22, y: -18)
-                                .clipped()
-                        }
-                    }
-                    .overlay(alignment: .top) {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(0.34),
-                                        Color.white.opacity(0.10),
-                                        Color.white.opacity(0.04),
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing),
-                                lineWidth: 1)
-                    }
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(Color.white.opacity(0.10))
-            }
-            .shadow(color: Color.black.opacity(0.16), radius: 10, y: 6)
-    }
-
-    func glassSurface(cornerRadius: CGFloat, tint: Color = .clear) -> some View {
-        self
-            .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.12),
-                                Color.white.opacity(0.045),
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(tint)
-                    }
-                    .overlay(alignment: .top) {
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .stroke(
-                                LinearGradient(
-                                    colors: [
-                                        Color.white.opacity(0.32),
-                                        Color.white.opacity(0.08),
-                                        Color.white.opacity(0.03),
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing),
-                                lineWidth: 1)
-                    }
-            }
-    }
-}

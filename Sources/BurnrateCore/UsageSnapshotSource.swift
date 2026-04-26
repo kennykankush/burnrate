@@ -5,12 +5,12 @@ public actor UsageSnapshotSource {
 
     public func loadOverview() async throws -> UsageOverview {
         let now = Date()
-        let codex = await CodexUsageFetcher().loadSnapshot(now: now) ?? Self.sampleCodex(now: now)
+        async let codexAsync = CodexUsageFetcher().loadSnapshot(now: now)
+        async let claudeAsync = ClaudeUsageWatcher().loadSnapshot(now: now)
+        let codex = await codexAsync ?? Self.sampleCodex(now: now)
+        let claude = await claudeAsync ?? Self.sampleClaude(now: now)
         return UsageOverview(
-            snapshots: [
-                codex,
-                Self.sampleClaude(now: now),
-            ],
+            snapshots: [codex, claude],
             updatedAt: Date())
     }
 
@@ -220,6 +220,7 @@ private struct CodexSessionWatcher {
         var webSearches = 0
         var errors = 0
         var compactions = 0
+        var flightEvents: [CodexFlightEvent] = []
 
         for line in content.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
@@ -256,22 +257,59 @@ private struct CodexSessionWatcher {
 
             if payloadType == "exec_command_end" {
                 shellCommands += 1
+                if shellCommands <= 3 || shellCommands % 8 == 0 {
+                    flightEvents.append(
+                        CodexFlightEvent(
+                            timestamp: date ?? latestDate,
+                            kind: .shell,
+                            title: "Shell activity",
+                            detail: "\(shellCommands) commands this session",
+                            tokenImpact: nil))
+                }
             }
 
             if payloadType?.contains("patch") == true {
                 patchEvents += 1
+                flightEvents.append(
+                    CodexFlightEvent(
+                        timestamp: date ?? latestDate,
+                        kind: .patch,
+                        title: "Code edit",
+                        detail: "\(patchEvents) patch events seen",
+                        tokenImpact: nil))
             }
 
             if payloadType?.contains("web_search") == true {
                 webSearches += 1
+                flightEvents.append(
+                    CodexFlightEvent(
+                        timestamp: date ?? latestDate,
+                        kind: .web,
+                        title: "Web search",
+                        detail: "\(webSearches) searches this session",
+                        tokenImpact: nil))
             }
 
             if topType == "error" || payloadType?.contains("error") == true {
                 errors += 1
+                flightEvents.append(
+                    CodexFlightEvent(
+                        timestamp: date ?? latestDate,
+                        kind: .error,
+                        title: "Error signal",
+                        detail: "\(errors) errors this session",
+                        tokenImpact: nil))
             }
 
             if payloadType?.contains("compact") == true {
                 compactions += 1
+                flightEvents.append(
+                    CodexFlightEvent(
+                        timestamp: date ?? latestDate,
+                        kind: .compaction,
+                        title: "Context compaction",
+                        detail: "\(compactions) compactions seen",
+                        tokenImpact: nil))
             }
 
             if payloadType == "token_count" {
@@ -289,6 +327,16 @@ private struct CodexSessionWatcher {
                 let reasoning = Self.int(lastUsage["reasoning_output_tokens"])
                 let contextWindow = Self.int(info["model_context_window"])
                 if used > 0, contextWindow > 0 {
+                    let turnTokens = input + output
+                    if turnTokens >= 15_000 {
+                        flightEvents.append(
+                            CodexFlightEvent(
+                                timestamp: date ?? latestDate,
+                                kind: .tokenSpike,
+                                title: "Large turn",
+                                detail: "\(Self.compact(input)) in / \(Self.compact(output)) out",
+                                tokenImpact: turnTokens))
+                    }
                     tokenSamples.append(
                         TokenSample(
                             date: date ?? latestDate,
@@ -310,6 +358,11 @@ private struct CodexSessionWatcher {
         let totalReasoning = tokenSamples.reduce(0) { $0 + $1.reasoning }
         let averageGrowth = Self.averagePositiveGrowth(tokenSamples.map(\.used)) ?? Self.average(tokenSamples.suffix(5).map(\.used))
         let activeMinutes = Self.minutes(from: firstDate, to: latestDate)
+        let project = directory.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
+        let curatedFlightEvents = Self.curatedFlightEvents(flightEvents)
+        let biggestBurnEvent = curatedFlightEvents
+            .filter { $0.tokenImpact != nil }
+            .max { ($0.tokenImpact ?? 0) < ($1.tokenImpact ?? 0) }
 
         let context = WorkContextSnapshot(
             sessionId: sessionId,
@@ -322,7 +375,23 @@ private struct CodexSessionWatcher {
             userMessageCount: userMessageCount,
             updatedAt: latestDate)
 
+        let insight = Self.insight(
+            context: context,
+            latest: latest,
+            windows: latestRateLimit?.windows ?? [],
+            totalInput: totalInput,
+            totalCached: totalCached,
+            totalOutput: totalOutput,
+            errors: errors,
+            compactions: compactions,
+            shellCommands: shellCommands,
+            webSearches: webSearches,
+            biggestBurn: biggestBurnEvent,
+            activeMinutes: activeMinutes,
+            latestDate: latestDate)
+
         let codexSession = CodexSessionStats(
+            insight: insight,
             threadTitle: thread?.title,
             gitBranch: thread?.gitBranch,
             reasoningEffort: thread?.reasoningEffort,
@@ -338,17 +407,27 @@ private struct CodexSessionWatcher {
             reasoningOutputTokens: totalReasoning,
             lastInputTokens: latest.input,
             lastOutputTokens: latest.output,
+            lastCachedInputTokens: latest.cached,
+            lastReasoningOutputTokens: latest.reasoning,
             tokenEvents: tokenSamples.count,
             toolCalls: toolCalls,
             shellCommands: shellCommands,
             patchEvents: patchEvents,
             webSearches: webSearches,
             errors: errors,
-            compactions: compactions)
+            compactions: compactions,
+            flightEvents: curatedFlightEvents,
+            biggestBurnEvent: biggestBurnEvent)
 
         let windows = latestRateLimit?.windows ?? []
-        let project = directory.map { URL(fileURLWithPath: $0).lastPathComponent }
         let modelMix = modelName.map { [ModelUsageShare(modelName: $0, percent: 100)] } ?? []
+        let memory = CodexHistoryStore().record(
+            sessionId: sessionId ?? file.lastPathComponent,
+            projectName: project,
+            threadTitle: thread?.title,
+            totalTokens: totalInput + totalOutput,
+            turnCount: max(1, tokenSamples.count),
+            updatedAt: latestDate)
 
         return CodexLocalSnapshot(
             context: context,
@@ -357,6 +436,7 @@ private struct CodexSessionWatcher {
             planName: latestRateLimit?.planName,
             creditBalance: latestRateLimit?.creditBalance,
             projectLabel: project,
+            memory: memory,
             today: DailyUsageStats(
                 requests: userMessageCount,
                 inputTokens: totalInput,
@@ -365,6 +445,128 @@ private struct CodexSessionWatcher {
                 spend: nil,
                 peakHourLabel: "current session"),
             modelMix: modelMix)
+    }
+
+    private static func insight(
+        context: WorkContextSnapshot,
+        latest: TokenSample,
+        windows: [UsageWindow],
+        totalInput: Int,
+        totalCached: Int,
+        totalOutput: Int,
+        errors: Int,
+        compactions: Int,
+        shellCommands: Int,
+        webSearches: Int,
+        biggestBurn: CodexFlightEvent?,
+        activeMinutes: Int,
+        latestDate: Date) -> CodexSessionInsight
+    {
+        let primaryUsedPercent = windows.first?.usedPercent ?? 0
+        let messagesRemaining = context.estimatedMessagesRemaining
+        let idleSeconds = max(0, Int(Date().timeIntervalSince(latestDate)))
+        let lastTurnTokens = latest.input + latest.output
+        let lastTurnShare = context.contextWindowTokens > 0
+            ? Double(lastTurnTokens) / Double(context.contextWindowTokens) * 100
+            : 0
+        let tokensPerMinute = activeMinutes > 0
+            ? max(0, (totalInput + totalOutput) / activeMinutes)
+            : 0
+        let cacheShare = totalInput > 0 ? Double(totalCached) / Double(totalInput) * 100 : 0
+        let lastCacheShare = latest.input > 0 ? Double(latest.cached) / Double(latest.input) * 100 : 0
+
+        let health: CodexThreadHealth
+        let recommendation: String
+        let riskReason: String
+
+        if errors > 0, idleSeconds > 300 {
+            health = .stuck
+            recommendation = "Check the last command before continuing."
+            riskReason = "The latest session has errors and has been idle for \(idleSeconds / 60)m."
+        } else if context.contextUsedPercent >= 86 || primaryUsedPercent >= 90 || (messagesRemaining ?? 99) <= 2 {
+            health = .tight
+            recommendation = "Wrap this thread and start fresh soon."
+            riskReason = "Context or the 5h burst window is close to the edge."
+        } else if context.contextUsedPercent >= 70 || primaryUsedPercent >= 75 || (messagesRemaining ?? 99) <= 5 {
+            health = .watch
+            recommendation = "Keep the next ask focused."
+            riskReason = "The session is still usable, but pressure is building."
+        } else if cacheShare >= 70, latest.used < 65_000 {
+            health = .efficient
+            recommendation = "Keep going in this thread."
+            riskReason = "The thread is reusing context efficiently."
+        } else {
+            health = .healthy
+            recommendation = "Good room for more work."
+            riskReason = "No major pressure signal is active."
+        }
+
+        let driver: (String, String)
+        if latest.input > 30_000, lastCacheShare >= 70 {
+            driver = ("Context replay", "\(Int(lastCacheShare.rounded()))% of last input was cached")
+        } else if latest.input > 30_000 {
+            driver = ("Large prompt", "\(Self.compact(latest.input)) input tokens last turn")
+        } else if webSearches > 0, latest.input > 15_000 {
+            driver = ("Web context", "\(webSearches) searches added context")
+        } else if shellCommands > 8 {
+            driver = ("Tool loop", "\(shellCommands) shell commands this session")
+        } else if compactions > 0 {
+            driver = ("Compaction", "\(compactions) context compactions seen")
+        } else if latest.reasoning > 0 {
+            driver = ("Reasoning", "\(Self.compact(latest.reasoning)) reasoning tokens last turn")
+        } else {
+            driver = ("Steady burn", "\(Self.compact(lastTurnTokens)) tokens last turn")
+        }
+
+        let forecast: String
+        if let messagesRemaining {
+            if messagesRemaining <= 2 {
+                forecast = "~\(messagesRemaining) focused turns left"
+            } else if messagesRemaining > 99 {
+                forecast = "Plenty of context left"
+            } else {
+                forecast = "~\(messagesRemaining) turns at this pace"
+            }
+        } else {
+            forecast = "Learning this thread's pace"
+        }
+
+        let resetPlan: String
+        if primaryUsedPercent >= 85 {
+            resetPlan = "The 5h window is the bottleneck right now."
+        } else if let biggestBurn {
+            resetPlan = "Biggest burn: \(biggestBurn.title.lowercased()) at \(Self.compact(biggestBurn.tokenImpact ?? 0))."
+        } else if context.contextUsedPercent >= 70 {
+            resetPlan = "Context is the bottleneck before the reset."
+        } else {
+            resetPlan = "Current pace should fit this window."
+        }
+
+        return CodexSessionInsight(
+            health: health,
+            recommendation: recommendation,
+            primaryDriver: driver.0,
+            driverDetail: driver.1,
+            forecast: forecast,
+            riskReason: riskReason,
+            resetPlan: resetPlan,
+            lastTurnSharePercent: lastTurnShare,
+            projectedTurnsRemaining: messagesRemaining,
+            tokensPerMinute: tokensPerMinute)
+    }
+
+    private static func curatedFlightEvents(_ events: [CodexFlightEvent]) -> [CodexFlightEvent] {
+        let significant = events.filter { event in
+            switch event.kind {
+            case .tokenSpike, .error, .compaction, .web:
+                return true
+            case .shell, .patch:
+                return event.tokenImpact != nil
+            }
+        }
+
+        let fallback = significant.isEmpty ? events : significant
+        return Array(fallback.suffix(5).reversed())
     }
 
     private func latestSessionFile() -> URL? {
@@ -440,6 +642,19 @@ private struct CodexSessionWatcher {
         return max(0, Int(end.timeIntervalSince(start) / 60))
     }
 
+    private static func compact(_ value: Int) -> String {
+        switch value {
+        case 1_000_000...:
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        case 10_000...:
+            return "\(value / 1_000)K"
+        case 1_000...:
+            return String(format: "%.1fK", Double(value) / 1_000)
+        default:
+            return "\(value)"
+        }
+    }
+
     private static func int(_ value: Any?) -> Int {
         if let value = value as? Int { return value }
         if let value = value as? Double { return Int(value) }
@@ -497,6 +712,7 @@ private struct CodexLocalSnapshot {
     let planName: String?
     let creditBalance: Double?
     let projectLabel: String?
+    let memory: CodexProjectMemory?
     let today: DailyUsageStats
     let modelMix: [ModelUsageShare]
 
@@ -511,10 +727,102 @@ private struct CodexLocalSnapshot {
             modelMix: self.modelMix,
             workContext: self.context,
             codexSession: self.codexSession,
+            codexMemory: self.memory,
             creditBalance: self.creditBalance,
             extraSpend: nil,
             streakDays: 0,
             updatedAt: now)
+    }
+}
+
+private struct CodexHistoryStore {
+    func record(
+        sessionId: String,
+        projectName: String,
+        threadTitle: String?,
+        totalTokens: Int,
+        turnCount: Int,
+        updatedAt: Date) -> CodexProjectMemory?
+    {
+        var history = self.load()
+        history.sessions.removeAll { $0.sessionId == sessionId }
+        history.sessions.append(
+            SessionSummary(
+                sessionId: sessionId,
+                projectName: projectName,
+                threadTitle: threadTitle,
+                totalTokens: totalTokens,
+                turnCount: max(1, turnCount),
+                updatedAt: updatedAt))
+        history.sessions = Array(history.sessions.sorted { $0.updatedAt > $1.updatedAt }.prefix(240))
+        self.save(history)
+        return self.memory(projectName: projectName, history: history)
+    }
+
+    private func memory(projectName: String, history: HistoryFile) -> CodexProjectMemory? {
+        let all = history.sessions
+        let projectSessions = all.filter { $0.projectName == projectName }
+        guard !projectSessions.isEmpty else { return nil }
+
+        let averageSession = Self.average(projectSessions.map(\.totalTokens))
+        let averageTurn = Self.average(projectSessions.map { $0.totalTokens / max(1, $0.turnCount) })
+        let globalAverage = max(1, Self.average(all.map(\.totalTokens)))
+        let heaviest = projectSessions.max { $0.totalTokens < $1.totalTokens }
+
+        return CodexProjectMemory(
+            projectName: projectName,
+            sessionCount: projectSessions.count,
+            averageSessionTokens: averageSession,
+            averageTurnTokens: averageTurn,
+            heaviestSessionTokens: heaviest?.totalTokens ?? 0,
+            heaviestSessionTitle: heaviest?.threadTitle,
+            relativeBurnMultiple: Double(averageSession) / Double(globalAverage),
+            lastUpdatedAt: projectSessions.map(\.updatedAt).max())
+    }
+
+    private func load() -> HistoryFile {
+        guard let data = try? Data(contentsOf: self.url),
+              let decoded = try? JSONDecoder().decode(HistoryFile.self, from: data)
+        else { return HistoryFile(sessions: []) }
+        return decoded
+    }
+
+    private func save(_ history: HistoryFile) {
+        do {
+            try FileManager.default.createDirectory(
+                at: self.url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(history)
+            try data.write(to: self.url, options: [.atomic])
+        } catch {
+            // History is an enhancement; failures should not block telemetry.
+        }
+    }
+
+    private var url: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        return base.appendingPathComponent("burnrate/codex-history.json")
+    }
+
+    private static func average(_ values: [Int]) -> Int {
+        guard !values.isEmpty else { return 0 }
+        return values.reduce(0, +) / values.count
+    }
+
+    private struct HistoryFile: Codable {
+        var sessions: [SessionSummary]
+    }
+
+    private struct SessionSummary: Codable {
+        let sessionId: String
+        let projectName: String
+        let threadTitle: String?
+        let totalTokens: Int
+        let turnCount: Int
+        let updatedAt: Date
     }
 }
 

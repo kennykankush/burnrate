@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Burnrate — AI usage, made visible.</title>
+<meta name="description" content="A native macOS menu bar app that turns Claude, Codex, and Cursor usage into a live burn meter." />
+<meta name="theme-color" content="#0b0820" />
+<link rel="icon" type="image/png" href="assets/glyph.png" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+
+<style>
+  :root {
+    --bg-0: #07051a;
+    --bg-1: #0d0a2c;
+    --bg-2: #1a1148;
+    --text: #f6f1ff;
+    --text-dim: rgba(246, 241, 255, 0.62);
+    --text-mute: rgba(246, 241, 255, 0.42);
+    --accent: #b29bff;
+    --accent-strong: #8a6bff;
+    --warm: #ff8a3d;
+    --warm-soft: #ffb070;
+    --ok: #6dffaf;
+
+    --glass: rgba(255, 255, 255, 0.06);
+    --glass-strong: rgba(255, 255, 255, 0.10);
+    --glass-border: rgba(255, 255, 255, 0.12);
+    --glass-border-strong: rgba(255, 255, 255, 0.20);
+
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+    --gap-1: 4px;
+    --gap-2: 8px;
+    --gap-3: 12px;
+    --gap-4: 16px;
+    --gap-5: 24px;
+    --gap-6: 32px;
+    --gap-7: 48px;
+
+    --radius-sm: 8px;
+    --radius-md: 14px;
+    --radius-lg: 20px;
+    --radius-xl: 28px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    line-height: 1.5;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+  html { height: 100%; }
+  body {
+    height: 100dvh;
+    background:
+      radial-gradient(1200px 700px at 80% 20%, rgba(75, 130, 200, 0.18), transparent 60%),
+      radial-gradient(1000px 600px at 15% 80%, rgba(138, 107, 255, 0.22), transparent 60%),
+      radial-gradient(700px 500px at 50% 50%, rgba(255, 138, 61, 0.06), transparent 70%),
+      linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+  }
+  a { color: inherit; text-decoration: none; }
+  ::selection { background: var(--accent-strong); color: white; }
+
+  /* ---------- Page shell ---------- */
+  .page {
+    position: relative;
+    height: 100dvh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    isolation: isolate;
+  }
+
+  /* ---------- Page ambient (moana stays inside .visual only) ---------- */
+  .bg {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .bg::before {
+    content: '';
+    position: absolute;
+    width: 60vmin; height: 60vmin;
+    top: -10vmin; right: -10vmin;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(178, 155, 255, 0.18), transparent 70%);
+    filter: blur(20px);
+  }
+  .bg::after {
+    content: '';
+    position: absolute;
+    width: 70vmin; height: 70vmin;
+    bottom: -15vmin; left: -15vmin;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 138, 61, 0.10), transparent 70%);
+    filter: blur(20px);
+  }
+
+  /* ---------- Nav ---------- */
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--gap-3) var(--gap-5);
+    height: 56px;
+  }
+  .nav-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gap-2);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    font-size: 15px;
+  }
+  .nav-brand img {
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
+    filter: drop-shadow(0 6px 16px rgba(178, 155, 255, 0.45));
+  }
+  .nav-links {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gap-1);
+  }
+  .nav-link {
+    font-size: 13px;
+    color: var(--text-dim);
+    padding: 8px 12px;
+    border-radius: 999px;
+    transition: color 160ms var(--ease-out), background-color 160ms var(--ease-out);
+  }
+  .nav-link:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+  /* ---------- Main hero ---------- */
+  .main {
+    display: grid;
+    place-items: center;
+    padding: 0 var(--gap-5) var(--gap-5);
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .hero-card {
+    width: min(100%, 1100px);
+    height: 100%;
+    max-height: 760px;
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    border-radius: var(--radius-xl);
+    background: rgba(13, 10, 44, 0.55);
+    border: 1px solid var(--glass-border-strong);
+    backdrop-filter: blur(16px) saturate(1.3);
+    -webkit-backdrop-filter: blur(16px) saturate(1.3);
+    box-shadow:
+      0 40px 100px -20px rgba(0, 0, 0, 0.55),
+      0 18px 50px -20px rgba(138, 107, 255, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.16),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+    overflow: hidden;
+    transform: translateZ(0);
+  }
+
+  /* ---------- Left: visual ---------- */
+  .visual {
+    position: relative;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+    background: rgba(8, 5, 30, 0.25);
+  }
+  .visual::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: url('assets/header.png') center 40% / cover no-repeat;
+    transform: scale(1.04);
+    animation: drift 22s var(--ease-in-out) infinite alternate;
+    will-change: transform;
+  }
+  @keyframes drift {
+    from { transform: scale(1.04) translate3d(0, 0, 0); }
+    to   { transform: scale(1.10) translate3d(-1.2%, -0.8%, 0); }
+  }
+  .visual::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(7, 5, 26, 0) 0%, rgba(7, 5, 26, 0.18) 60%, rgba(7, 5, 26, 0.55) 100%);
+  }
+
+  .visual-overlay {
+    position: absolute;
+    inset: auto var(--gap-5) var(--gap-5) var(--gap-5);
+    z-index: 2;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--gap-2);
+  }
+  .stat {
+    padding: var(--gap-3) var(--gap-3);
+    border-radius: var(--radius-md);
+    background: rgba(7, 5, 26, 0.55);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: blur(14px) saturate(1.4);
+    -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  }
+  .stat .k {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-mute);
+    font-weight: 600;
+  }
+  .stat .v {
+    margin-top: 4px;
+    font-family: 'Inter', sans-serif;
+    font-feature-settings: 'tnum' 1;
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  .stat .v em {
+    font-weight: 500;
+    font-size: 12px;
+    color: var(--text-dim);
+    font-style: normal;
+    letter-spacing: 0;
+    margin-left: 4px;
+  }
+
+  /* ---------- Right: content ---------- */
+  .content {
+    display: grid;
+    grid-template-rows: auto 1fr auto auto;
+    padding: var(--gap-7) var(--gap-6) var(--gap-6);
+    gap: var(--gap-4);
+    min-height: 0;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 11px 5px 7px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--glass);
+    border: 1px solid var(--glass-border);
+    border-radius: 999px;
+    width: max-content;
+  }
+  .eyebrow-dot {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 10px var(--ok);
+    animation: pulse 2.4s var(--ease-in-out) infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .headline {
+    font-weight: 800;
+    font-size: clamp(36px, 4.6vw, 60px);
+    line-height: 1.0;
+    letter-spacing: -0.035em;
+    margin: 0;
+    background: linear-gradient(180deg, #ffffff 0%, #d8c8ff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .headline em {
+    font-family: 'Instrument Serif', serif;
+    font-style: italic;
+    font-weight: 400;
+    background: linear-gradient(180deg, #ffd4b0 0%, #ff8a3d 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    letter-spacing: -0.01em;
+  }
+
+  .sub {
+    font-size: 14px;
+    color: var(--text-dim);
+    line-height: 1.55;
+    margin: 0;
+    max-width: 38ch;
+  }
+
+  .cta-row {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gap-2);
+    flex-wrap: wrap;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: -0.005em;
+    padding: 11px 16px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: transform 160ms var(--ease-out),
+                background-color 200ms var(--ease-out),
+                border-color 200ms var(--ease-out),
+                box-shadow 200ms var(--ease-out);
+    will-change: transform;
+    min-height: 40px;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .btn-primary {
+    color: #1a0f3a;
+    background: linear-gradient(180deg, #ffffff 0%, #ece4ff 100%);
+    box-shadow: 0 6px 22px rgba(178, 155, 255, 0.32),
+                inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  }
+  .btn-primary:hover {
+    box-shadow: 0 10px 30px rgba(178, 155, 255, 0.5),
+                inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  }
+  .btn-ghost {
+    color: var(--text);
+    background: var(--glass);
+    border-color: var(--glass-border);
+  }
+  .btn-ghost:hover {
+    background: var(--glass-strong);
+    border-color: var(--glass-border-strong);
+  }
+  .btn svg { width: 14px; height: 14px; }
+
+  .meta {
+    color: var(--text-mute);
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--gap-3);
+  }
+  .meta-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--text-mute); }
+
+  /* feature row inside the content panel */
+  .feature-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--gap-2);
+    padding-top: var(--gap-4);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .feature {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    grid-template-rows: auto auto;
+    gap: 2px var(--gap-2);
+    padding: var(--gap-2) 0;
+  }
+  .feature-icon {
+    grid-row: 1 / 3;
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    display: grid;
+    place-items: center;
+    background: linear-gradient(180deg, rgba(178, 155, 255, 0.20), rgba(178, 155, 255, 0.06));
+    border: 1px solid rgba(178, 155, 255, 0.25);
+    color: #d8c8ff;
+  }
+  .feature-icon svg { width: 14px; height: 14px; }
+  .feature .t {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--text);
+  }
+  .feature .d {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+
+  /* ---------- Reveal ---------- */
+  .r {
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 700ms var(--ease-out), transform 700ms var(--ease-out);
+  }
+  .r[data-mounted='true'] { opacity: 1; transform: translateY(0); }
+  .r[data-d='1'] { transition-delay: 60ms; }
+  .r[data-d='2'] { transition-delay: 120ms; }
+  .r[data-d='3'] { transition-delay: 180ms; }
+  .r[data-d='4'] { transition-delay: 240ms; }
+  .r[data-d='5'] { transition-delay: 300ms; }
+  .r[data-d='6'] { transition-delay: 360ms; }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width: 980px) {
+    html, body { overflow: auto; }
+    body { height: auto; min-height: 100dvh; }
+    .page { height: auto; min-height: 100dvh; }
+    .hero-card {
+      grid-template-columns: 1fr;
+      max-height: none;
+      height: auto;
+    }
+    .visual {
+      min-height: 320px;
+      border-right: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .content { padding: var(--gap-5); }
+    .feature-row { grid-template-columns: 1fr; }
+    .nav-link[data-hide-sm] { display: none; }
+  }
+
+  @media (max-width: 540px) {
+    .visual-overlay { grid-template-columns: 1fr; gap: 6px; }
+    .stat .v { font-size: 15px; }
+    .headline { font-size: 38px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .r { opacity: 1; transform: none; transition: none; }
+    .bg::before { animation: none; }
+    .eyebrow-dot { animation: none; }
+    * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+  <div class="bg" aria-hidden="true"></div>
+
+  <nav class="nav r" data-d="1">
+    <a href="#" class="nav-brand" aria-label="Burnrate home">
+      <img src="assets/glyph.png" alt="" />
+      <span>Burnrate</span>
+    </a>
+    <div class="nav-links">
+      <a href="#" class="nav-link" data-hide-sm>Features</a>
+      <a href="https://github.com" class="nav-link" target="_blank" rel="noopener" data-hide-sm>GitHub</a>
+      <a href="#download" class="btn btn-primary" style="padding:8px 14px;font-size:13px;min-height:36px">
+        Download
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <main class="main">
+    <section class="hero-card r" data-d="2" aria-label="Burnrate">
+
+      <div class="visual">
+        <div class="visual-overlay">
+          <div class="stat r" data-d="4">
+            <div class="k">5h burn</div>
+            <div class="v" id="stat-burn">128,420<em>tok</em></div>
+          </div>
+          <div class="stat r" data-d="5">
+            <div class="k">Used</div>
+            <div class="v">64<em>%</em></div>
+          </div>
+          <div class="stat r" data-d="6">
+            <div class="k">Resets in</div>
+            <div class="v">2:41<em>h</em></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="content">
+        <div class="eyebrow r" data-d="3">
+          <span class="eyebrow-dot"></span>
+          Private beta · macOS 14+
+        </div>
+
+        <div>
+          <h1 class="headline r" data-d="4">AI usage,<br/>made <em>visible.</em></h1>
+          <p class="sub r" data-d="5" style="margin-top:14px">
+            A native macOS menu bar app that turns Claude, Codex, and Cursor activity into a live burn meter — so you know exactly how much context you've spent before the request fails.
+          </p>
+        </div>
+
+        <div class="r" data-d="6">
+          <div class="cta-row">
+            <a id="download" href="#" class="btn btn-primary">
+              Download for macOS
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+            </a>
+            <a href="https://github.com" class="btn btn-ghost" target="_blank" rel="noopener">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.35.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.92 10.92 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+              GitHub
+            </a>
+          </div>
+          <div class="meta" style="margin-top:10px">
+            <span>Free</span><span class="meta-sep"></span>
+            <span>4.2 MB</span><span class="meta-sep"></span>
+            <span>Apple Silicon &amp; Intel</span>
+          </div>
+        </div>
+
+        <div class="feature-row">
+          <div class="feature r" data-d="6">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h3l3-9 6 18 3-9h3"/></svg>
+            </div>
+            <div class="t">Real-time</div>
+            <div class="d">Live token spend in your menu bar</div>
+          </div>
+          <div class="feature r" data-d="6">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+            </div>
+            <div class="t">Burn alerts</div>
+            <div class="d">Quiet ping at 30 minutes left</div>
+          </div>
+          <div class="feature r" data-d="6">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+            </div>
+            <div class="t">All providers</div>
+            <div class="d">Claude · Codex · Cursor in one</div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.r').forEach(el => el.dataset.mounted = 'true');
+  });
+
+  // Tiny one-shot count-up on the burn stat — runs once per visit.
+  const burn = document.getElementById('stat-burn');
+  if (burn && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    const target = 128420;
+    const start = performance.now();
+    const dur = 1300;
+    const ease = t => 1 - Math.pow(1 - t, 3);
+    const unit = burn.querySelector('em');
+    function tick(now) {
+      const t = Math.min(1, (now - start) / dur);
+      const v = Math.round(ease(t) * target);
+      burn.firstChild.textContent = v.toLocaleString();
+      if (t < 1) requestAnimationFrame(tick);
+    }
+    burn.firstChild.textContent = '0';
+    requestAnimationFrame(tick);
+  }
+</script>
+
+</body>
+</html>

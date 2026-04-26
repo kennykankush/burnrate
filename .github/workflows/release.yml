@@ -1,0 +1,93 @@
+name: Release
+
+# Runs on `git push origin v<x.y.z>` and produces a GitHub Release with the
+# zipped .app attached. Until you set up Developer ID + notarisation, builds
+# in CI fall back to ad-hoc signing — fine for unsigned-friendly users.
+#
+# To switch to signed builds in CI, add these repository secrets:
+#   APPLE_DEVELOPER_CERT_P12_BASE64    (your .p12, base64-encoded)
+#   APPLE_DEVELOPER_CERT_PASSWORD      (the .p12 password)
+#   APPLE_DEVELOPER_IDENTITY_NAME      ("Developer ID Application: ...")
+# then uncomment the "Import signing certificate" step.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # needed for `gh release create`
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.10"
+
+      # - name: Import signing certificate
+      #   env:
+      #     P12_BASE64: ${{ secrets.APPLE_DEVELOPER_CERT_P12_BASE64 }}
+      #     P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_CERT_PASSWORD }}
+      #   run: |
+      #     KEYCHAIN=$RUNNER_TEMP/build.keychain
+      #     security create-keychain -p actions "$KEYCHAIN"
+      #     security set-keychain-settings -lut 21600 "$KEYCHAIN"
+      #     security unlock-keychain -p actions "$KEYCHAIN"
+      #     echo "$P12_BASE64" | base64 --decode > $RUNNER_TEMP/cert.p12
+      #     security import $RUNNER_TEMP/cert.p12 -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+      #     security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+      #     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions "$KEYCHAIN"
+
+      - name: Build .app skeleton
+        run: |
+          mkdir -p .build/debug/burnrate.app/Contents/MacOS
+          mkdir -p .build/debug/burnrate.app/Contents/Resources
+          # Reuse the committed Info.plist if present, otherwise generate one.
+          if [ ! -f .build/debug/burnrate.app/Contents/Info.plist ]; then
+            cat > .build/debug/burnrate.app/Contents/Info.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDisplayName</key><string>burnrate</string>
+            <key>CFBundleExecutable</key><string>burnrate</string>
+            <key>CFBundleIdentifier</key><string>fyi.burnrate.app</string>
+            <key>CFBundleName</key><string>burnrate</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.0.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSMinimumSystemVersion</key><string>14.0</string>
+            <key>LSUIElement</key><true/>
+            <key>NSPrincipalClass</key><string>NSApplication</string>
+          </dict>
+          </plist>
+          PLIST
+          fi
+
+      - name: Run release script
+        env:
+          # Set the version from the git tag (strip the leading "v")
+          BURNRATE_VERSION: ${{ github.ref_name }}
+          # BURNRATE_SIGN_IDENTITY: ${{ secrets.APPLE_DEVELOPER_IDENTITY_NAME }}
+        run: |
+          VERSION="${BURNRATE_VERSION#v}"
+          bash scripts/release.sh "$VERSION"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/burnrate-$VERSION.zip" \
+            --title "v$VERSION" \
+            --generate-notes
+
+      - name: Print SHA256 (paste into Casks/burnrate.rb)
+        run: cat dist/burnrate-*.sha256

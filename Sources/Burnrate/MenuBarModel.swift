@@ -9,8 +9,10 @@ final class MenuBarModel {
     var selectedProvider: ProviderKind = .codex
     var isRefreshing = false
     var lastError: String?
+    var alertMode: UsageAlertMode = UsageAlertMode(rawValue: UserDefaults.standard.string(forKey: UsageNotificationController.alertModeKey) ?? "") ?? .all
 
     private let source = UsageSnapshotSource()
+    private let notificationController = UsageNotificationController()
     private var hasStarted = false
     private var refreshTask: Task<Void, Never>?
 
@@ -28,6 +30,7 @@ final class MenuBarModel {
         guard !self.hasStarted else { return }
         self.hasStarted = true
         self.refreshTask = Task {
+            await self.notificationController.prepare()
             await self.refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
@@ -44,6 +47,7 @@ final class MenuBarModel {
         do {
             let overview = try await self.source.loadOverview()
             self.overview = overview
+            await self.notificationController.evaluate(overview)
             if overview.snapshot(for: self.selectedProvider) == nil,
                let first = overview.snapshots.first
             {
@@ -53,5 +57,10 @@ final class MenuBarModel {
         } catch {
             self.lastError = error.localizedDescription
         }
+    }
+
+    func cycleAlertMode() {
+        self.alertMode = self.alertMode.next
+        UserDefaults.standard.set(self.alertMode.rawValue, forKey: UsageNotificationController.alertModeKey)
     }
 }

@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Burnrate · Hero alignment dev</title>
+<link rel="icon" type="image/png" href="assets/glyph.png" />
+
+<style>
+  :root {
+    --bg-0: #07051a;
+    --bg-1: #0d0a2c;
+    --text: #f6f1ff;
+    --text-dim: rgba(246, 241, 255, 0.62);
+    --text-mute: rgba(246, 241, 255, 0.42);
+    --accent: #b29bff;
+    --warm: #ff8a3d;
+    --glass-border: rgba(255, 255, 255, 0.14);
+    --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+    min-height: 100dvh;
+  }
+  a { color: var(--accent); }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--glass-border);
+    background: rgba(13, 10, 44, 0.6);
+    backdrop-filter: blur(14px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .topbar h1 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+  .topbar .meta { font-size: 12px; color: var(--text-mute); font-family: 'SF Mono', ui-monospace, Menlo, monospace; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    gap: 0;
+    min-height: calc(100dvh - 49px);
+  }
+
+  /* ---------- Stage ---------- */
+  .stage {
+    position: relative;
+    overflow: auto;
+    background: var(--bg-0);
+    background-image:
+      linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 40px 40px, 40px 40px;
+  }
+  .stage-inner {
+    position: relative;
+    width: calc(100% * var(--zoom, 1));
+    height: calc(100% * var(--zoom, 1));
+    min-height: 100%;
+    transition: width 220ms var(--ease-out), height 220ms var(--ease-out);
+  }
+  .stage[data-dragging='true'] .stage-inner { transition: none; }
+  .stage-frame {
+    position: absolute;
+    inset: 24px;
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px dashed rgba(255, 255, 255, 0.18);
+    background: var(--bg-1);
+  }
+  /* Frame fills the stage minus padding — no aspect-ratio slider so values
+     stay deterministic across dev sessions. */
+  .zoom-readout {
+    position: absolute;
+    top: 12px; right: 12px;
+    z-index: 5;
+    font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    color: var(--text-mute);
+    padding: 4px 8px;
+    background: rgba(7, 5, 26, 0.7);
+    border: 1px solid var(--glass-border);
+    border-radius: 6px;
+    pointer-events: none;
+  }
+  .slide {
+    position: absolute;
+    inset: 0;
+    background-repeat: no-repeat;
+    background-size: var(--size, cover);
+    background-position: var(--posx, 50%) var(--posy, 50%);
+    opacity: 0.4;
+    pointer-events: none;
+    transition: opacity 200ms var(--ease-out);
+  }
+  .slide-1 { background-image: url('assets/header-1.png'); }
+  .slide-2 { background-image: url('assets/header-2.png'); }
+  .slide-3 { background-image: url('assets/header-3.png'); }
+
+  .slide[data-visible='false'] { opacity: 0; }
+  .stage[data-solo='1'] .slide-1,
+  .stage[data-solo='2'] .slide-2,
+  .stage[data-solo='3'] .slide-3 { opacity: 1; }
+  .stage[data-solo='1'] .slide:not(.slide-1),
+  .stage[data-solo='2'] .slide:not(.slide-2),
+  .stage[data-solo='3'] .slide:not(.slide-3) { opacity: 0; }
+
+  /* Crosshair to mark the chosen logo target. */
+  .crosshair {
+    position: absolute;
+    left: var(--cx, 50%);
+    top: var(--cy, 35%);
+    width: 18px; height: 18px;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 3;
+    mix-blend-mode: difference;
+  }
+  .crosshair::before, .crosshair::after {
+    content: '';
+    position: absolute;
+    background: white;
+  }
+  .crosshair::before { left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-0.5px); }
+  .crosshair::after { top: 50%; left: 0; right: 0; height: 1px; transform: translateY(-0.5px); }
+
+  /* The headline preview (so you can judge the crown vs text relationship). */
+  .preview-headline {
+    position: absolute;
+    left: 50%; bottom: 60px;
+    transform: translateX(-50%);
+    text-align: center;
+    pointer-events: none;
+    z-index: 2;
+    color: rgba(255,255,255,0.75);
+  }
+  .preview-headline .pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(7, 5, 26, 0.6);
+    border: 1px solid rgba(255,255,255,0.18);
+    margin-bottom: 8px;
+  }
+  .preview-headline .h {
+    font-size: 36px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    text-shadow: 0 4px 24px rgba(0,0,0,0.6);
+  }
+
+  /* ---------- Panel ---------- */
+  .panel {
+    border-left: 1px solid var(--glass-border);
+    background: var(--bg-1);
+    padding: 16px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .group {
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.02);
+    padding: 12px 14px;
+  }
+  .group h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    margin: 0 0 10px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .group h3 .badge {
+    font-size: 11px;
+    color: var(--text-mute);
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+    font-weight: 500;
+  }
+
+  .row { display: grid; grid-template-columns: 60px 1fr 56px; gap: 10px; align-items: center; margin: 6px 0; }
+  .row label { font-size: 12px; color: var(--text-dim); }
+  .row input[type='range'] { width: 100%; }
+  .row .val {
+    font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+    font-size: 12px;
+    text-align: right;
+    color: var(--text);
+  }
+  .row-toggles {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .row-toggles button {
+    flex: 1;
+    appearance: none;
+    border: 1px solid var(--glass-border);
+    background: rgba(255,255,255,0.04);
+    color: var(--text-dim);
+    font-size: 11px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background-color 160ms var(--ease-out), color 160ms var(--ease-out), border-color 160ms var(--ease-out);
+  }
+  .row-toggles button:hover { color: var(--text); border-color: rgba(255,255,255,0.28); }
+  .row-toggles button[data-on='true'] {
+    background: var(--accent);
+    color: #1a0f3a;
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+
+  .global {
+    display: grid;
+    gap: 10px;
+  }
+  .global .row { grid-template-columns: 90px 1fr 56px; }
+
+  pre.css-out {
+    margin: 0;
+    padding: 12px;
+    background: #050315;
+    border-radius: 10px;
+    border: 1px solid var(--glass-border);
+    font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    line-height: 1.55;
+    color: #cfc4ff;
+    overflow-x: auto;
+    white-space: pre;
+    max-height: 220px;
+    overflow-y: auto;
+  }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+  }
+  .actions button {
+    flex: 1;
+    appearance: none;
+    border: 0;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 140ms var(--ease-out), background-color 200ms var(--ease-out);
+  }
+  .actions button:active { transform: scale(0.97); }
+  .btn-copy { background: var(--accent); color: #1a0f3a; }
+  .btn-copy:hover { background: #c9b6ff; }
+  .btn-reset { background: rgba(255,255,255,0.06); color: var(--text); }
+  .btn-reset:hover { background: rgba(255,255,255,0.12); }
+
+  .group .group-color-1 { color: #b29bff; }
+  .group .group-color-2 { color: #6dffaf; }
+  .group .group-color-3 { color: #ff8a3d; }
+
+  details summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-dim);
+    user-select: none;
+  }
+  details[open] summary { color: var(--text); }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-mute);
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Burnrate · Hero alignment dev</h1>
+  <span class="meta"><a href="index.html">← back to landing</a> · drag sliders, watch the crosshair</span>
+</div>
+
+<div class="layout">
+  <div class="stage" id="stage">
+    <div class="zoom-readout" id="zoom-readout">1.00×</div>
+    <div class="stage-inner" id="stage-inner">
+      <div class="stage-frame" id="frame">
+        <div class="slide slide-1" id="slide-1"></div>
+        <div class="slide slide-2" id="slide-2"></div>
+        <div class="slide slide-3" id="slide-3"></div>
+        <div class="crosshair" id="crosshair"></div>
+        <div class="preview-headline">
+          <div class="pill">● Now in private beta · macOS 14+</div>
+          <div class="h">AI usage,<br/>made <span style="font-style:italic;font-weight:400;color:#ff8a3d">visible.</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="panel">
+
+    <div class="group global">
+      <h3>Stage <span class="badge">zoom + crosshair</span></h3>
+      <div class="row"><label>Zoom</label>
+        <input type="range" min="1" max="6" step="0.05" value="1" data-bind="zoom" />
+        <span class="val" data-out="zoom">1.00</span>
+      </div>
+      <div class="row"><label>Cross X</label>
+        <input type="range" min="0" max="100" step="0.1" value="50" data-bind="cx" />
+        <span class="val" data-out="cx">50.00</span>
+      </div>
+      <div class="row"><label>Cross Y</label>
+        <input type="range" min="0" max="100" step="0.1" value="34" data-bind="cy" />
+        <span class="val" data-out="cy">34.00</span>
+      </div>
+      <p class="hint">Zoom in to inspect logo edges. Scroll the stage to pan when zoomed. Move the crosshair to mark where the logo should land, then align each scene onto it.</p>
+    </div>
+
+    <div class="group" data-img="1">
+      <h3><span class="group-color-1">●</span> Antarctica <span class="badge">header-1</span></h3>
+      <div class="row"><label>Pos X</label>
+        <input type="range" min="-50" max="150" step="0.05" value="50" data-img="1" data-bind="x" />
+        <span class="val" data-img="1" data-out="x">50.00</span>
+      </div>
+      <div class="row"><label>Pos Y</label>
+        <input type="range" min="-50" max="150" step="0.05" value="20" data-img="1" data-bind="y" />
+        <span class="val" data-img="1" data-out="y">20.00</span>
+      </div>
+      <div class="row"><label>Size</label>
+        <input type="range" min="40" max="240" step="0.1" value="100" data-img="1" data-bind="s" />
+        <span class="val" data-img="1" data-out="s">100.0</span>
+      </div>
+      <div class="row-toggles">
+        <button data-vis="1">Visible</button>
+        <button data-solo="1">Solo</button>
+      </div>
+    </div>
+
+    <div class="group" data-img="2">
+      <h3><span class="group-color-2">●</span> Moana <span class="badge">header-2</span></h3>
+      <div class="row"><label>Pos X</label>
+        <input type="range" min="-50" max="150" step="0.05" value="50" data-img="2" data-bind="x" />
+        <span class="val" data-img="2" data-out="x">50.00</span>
+      </div>
+      <div class="row"><label>Pos Y</label>
+        <input type="range" min="-50" max="150" step="0.05" value="20" data-img="2" data-bind="y" />
+        <span class="val" data-img="2" data-out="y">20.00</span>
+      </div>
+      <div class="row"><label>Size</label>
+        <input type="range" min="40" max="240" step="0.1" value="100" data-img="2" data-bind="s" />
+        <span class="val" data-img="2" data-out="s">100.0</span>
+      </div>
+      <div class="row-toggles">
+        <button data-vis="2">Visible</button>
+        <button data-solo="2">Solo</button>
+      </div>
+    </div>
+
+    <div class="group" data-img="3">
+      <h3><span class="group-color-3">●</span> Niagara <span class="badge">header-3</span></h3>
+      <div class="row"><label>Pos X</label>
+        <input type="range" min="-50" max="150" step="0.05" value="50" data-img="3" data-bind="x" />
+        <span class="val" data-img="3" data-out="x">50.00</span>
+      </div>
+      <div class="row"><label>Pos Y</label>
+        <input type="range" min="-50" max="150" step="0.05" value="20" data-img="3" data-bind="y" />
+        <span class="val" data-img="3" data-out="y">20.00</span>
+      </div>
+      <div class="row"><label>Size</label>
+        <input type="range" min="40" max="240" step="0.1" value="100" data-img="3" data-bind="s" />
+        <span class="val" data-img="3" data-out="s">100.0</span>
+      </div>
+      <div class="row-toggles">
+        <button data-vis="3">Visible</button>
+        <button data-solo="3">Solo</button>
+      </div>
+    </div>
+
+    <details>
+      <summary>CSS output</summary>
+      <pre class="css-out" id="css-out"></pre>
+    </details>
+
+    <div class="actions">
+      <button class="btn-reset" id="btn-reset">Reset</button>
+      <button class="btn-copy" id="btn-copy">Copy CSS</button>
+    </div>
+
+  </aside>
+</div>
+
+<script>
+  const state = {
+    zoom: 1,
+    cx: 50,
+    cy: 34,
+    img: {
+      1: { x: 50, y: 20, s: 100, vis: true },
+      2: { x: 50, y: 20, s: 100, vis: true },
+      3: { x: 50, y: 20, s: 100, vis: true },
+    },
+    solo: null,
+  };
+
+  const stage = document.getElementById('stage');
+  const stageInner = document.getElementById('stage-inner');
+  const zoomReadout = document.getElementById('zoom-readout');
+  const crosshair = document.getElementById('crosshair');
+  const cssOut = document.getElementById('css-out');
+
+  function applyImage(i) {
+    const s = state.img[i];
+    const el = document.getElementById('slide-' + i);
+    el.style.setProperty('--posx', s.x + '%');
+    el.style.setProperty('--posy', s.y + '%');
+    // Size: 100 = cover. >100 zooms in. <100 zooms out (uses % of height).
+    if (Math.abs(s.s - 100) < 0.01) {
+      el.style.setProperty('--size', 'cover');
+    } else {
+      el.style.setProperty('--size', `auto ${fmt(s.s, 1)}%`);
+    }
+    el.dataset.visible = s.vis ? 'true' : 'false';
+  }
+
+  function applyCrosshair() {
+    crosshair.style.setProperty('--cx', state.cx + '%');
+    crosshair.style.setProperty('--cy', state.cy + '%');
+  }
+
+  function applyZoom() {
+    stageInner.style.setProperty('--zoom', state.zoom);
+    zoomReadout.textContent = fmt(state.zoom, 2) + '×';
+  }
+
+  function fmt(n, d=2) { return Number(n).toFixed(d); }
+
+  function writeCSS() {
+    const out = [];
+    out.push(`/* Crosshair target: ${fmt(state.cx)}% , ${fmt(state.cy)}% */`);
+    out.push('');
+    for (let i = 1; i <= 3; i++) {
+      const s = state.img[i];
+      const size = Math.abs(s.s - 100) < 0.01 ? 'cover' : `auto ${fmt(s.s, 1)}%`;
+      out.push(`.hero-slide-${i} {`);
+      out.push(`  background-image: url('assets/header-${i}.png');`);
+      out.push(`  background-size: ${size};`);
+      out.push(`  background-position: ${fmt(s.x)}% ${fmt(s.y)}%;`);
+      out.push(`}`);
+    }
+    cssOut.textContent = out.join('\n');
+  }
+
+  function updateValueLabels() {
+    document.querySelector('[data-out="zoom"]').textContent = fmt(state.zoom, 2);
+    document.querySelector('[data-out="cx"]').textContent = fmt(state.cx);
+    document.querySelector('[data-out="cy"]').textContent = fmt(state.cy);
+    for (let i = 1; i <= 3; i++) {
+      document.querySelector(`[data-img="${i}"][data-out="x"]`).textContent = fmt(state.img[i].x);
+      document.querySelector(`[data-img="${i}"][data-out="y"]`).textContent = fmt(state.img[i].y);
+      document.querySelector(`[data-img="${i}"][data-out="s"]`).textContent = fmt(state.img[i].s, 1);
+    }
+  }
+
+  function applyAll() {
+    applyImage(1); applyImage(2); applyImage(3);
+    applyCrosshair();
+    applyZoom();
+    updateValueLabels();
+    writeCSS();
+    persist();
+  }
+
+  // Wire up sliders
+  document.querySelectorAll('input[type="range"][data-bind]').forEach(input => {
+    input.addEventListener('input', () => {
+      const v = parseFloat(input.value);
+      const bind = input.dataset.bind;
+      const img = input.dataset.img;
+      if (img) {
+        state.img[img][bind] = v;
+      } else {
+        state[bind] = v;
+      }
+      applyAll();
+    });
+  });
+
+  // Visibility toggles
+  document.querySelectorAll('button[data-vis]').forEach(btn => {
+    const i = btn.dataset.vis;
+    btn.dataset.on = state.img[i].vis ? 'true' : 'false';
+    btn.addEventListener('click', () => {
+      state.img[i].vis = !state.img[i].vis;
+      btn.dataset.on = state.img[i].vis ? 'true' : 'false';
+      applyAll();
+    });
+  });
+
+  // Solo toggles (mutually exclusive)
+  document.querySelectorAll('button[data-solo]').forEach(btn => {
+    const i = btn.dataset.solo;
+    btn.addEventListener('click', () => {
+      state.solo = (state.solo === i) ? null : i;
+      document.querySelectorAll('button[data-solo]').forEach(b => {
+        b.dataset.on = (state.solo === b.dataset.solo) ? 'true' : 'false';
+      });
+      if (state.solo) stage.dataset.solo = state.solo;
+      else delete stage.dataset.solo;
+    });
+  });
+
+  // Reset
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    localStorage.removeItem('burnrate.hero-align');
+    location.reload();
+  });
+
+  // Copy
+  document.getElementById('btn-copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(cssOut.textContent);
+      const btn = document.getElementById('btn-copy');
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = orig, 1200);
+    } catch (e) { alert('Copy failed: ' + e); }
+  });
+
+  // Persist to localStorage so reloads keep your work
+  function persist() {
+    localStorage.setItem('burnrate.hero-align', JSON.stringify(state));
+  }
+  function restore() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('burnrate.hero-align') || 'null');
+      if (!saved) return;
+      Object.assign(state, saved);
+      // Re-bind slider values
+      document.querySelectorAll('input[type="range"][data-bind]').forEach(input => {
+        const bind = input.dataset.bind;
+        const img = input.dataset.img;
+        const v = img ? state.img[img][bind] : state[bind];
+        if (v !== undefined) input.value = v;
+      });
+      document.querySelectorAll('button[data-vis]').forEach(btn => {
+        btn.dataset.on = state.img[btn.dataset.vis].vis ? 'true' : 'false';
+      });
+    } catch (e) {}
+  }
+
+  restore();
+  applyAll();
+</script>
+
+</body>
+</html>
