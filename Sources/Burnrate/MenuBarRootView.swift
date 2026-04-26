@@ -75,6 +75,7 @@ struct MenuBarLabel: View {
     }
 }
 
+@MainActor
 private struct HeaderView: View {
     @Bindable var model: MenuBarModel
 
@@ -875,6 +876,7 @@ private struct EmptyStateView: View {
     }
 }
 
+@MainActor
 private struct FooterView: View {
     @Bindable var model: MenuBarModel
 

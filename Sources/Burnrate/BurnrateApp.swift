@@ -27,19 +27,23 @@ struct BurnrateAppScene: App {
 final class BurnrateAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let model = MenuBarModel()
     private var statusBar: StatusBarController?
-    private var labelRefreshTimer: Timer?
+    private var labelRefreshTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // No Dock icon — this is a status-bar app.
+        // No Dock icon. This is a status-bar app.
         NSApp.setActivationPolicy(.accessory)
 
-        let controller = StatusBarController(model: self.model)
-        self.statusBar = controller
+        self.statusBar = StatusBarController(model: self.model)
         self.model.start()
 
         // Refresh the menubar label periodically so the percent stays current.
-        self.labelRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak controller] _ in
-            Task { @MainActor in controller?.refreshLabel() }
+        // A Task with `Task.sleep` is the modern, concurrency-safe replacement
+        // for `Timer.scheduledTimer` here.
+        self.labelRefreshTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                self?.statusBar?.refreshLabel()
+            }
         }
     }
 }
