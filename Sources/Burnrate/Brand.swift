@@ -10,6 +10,7 @@ enum Brand {
         case shape3D = "base_3d"
         case outline = "base_outline"
         case fullWhite = "logo_full_white"
+        case main3D = "main_3d"
     }
 
     static func image(_ mark: Mark) -> Image {
@@ -17,6 +18,12 @@ enum Brand {
             return Image(nsImage: nsImage)
         }
         return Image(mark.rawValue, bundle: .module)
+    }
+
+    /// AppKit accessor used by code that needs an `NSImage` directly,
+    /// such as `NSStatusItem.button.image`.
+    static func nsImage(_ mark: Mark) -> NSImage? {
+        return Bundle.module.image(forResource: mark.rawValue)
     }
 
     static func providerImage(_ kind: ProviderKind) -> Image? {

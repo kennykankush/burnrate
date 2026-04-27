@@ -22,7 +22,18 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         if let button = item.button {
             button.action = #selector(self.handleClick(_:))
             button.target = self
-            button.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "burnrate")
+
+            // Prefer the bundled 3D burnrate logo over an SF Symbol.
+            // Status-bar items render at ~22pt; we scale the asset to 18pt
+            // so it visually matches macOS's other menu-bar icons with a
+            // touch of breathing room.
+            if let logo = Brand.nsImage(.main3D) {
+                logo.size = NSSize(width: 18, height: 18)
+                logo.isTemplate = false   // multicolor render — keep its colors
+                button.image = logo
+            } else {
+                button.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "burnrate")
+            }
             button.imagePosition = .imageLeading
             button.title = " --"
             button.font = NSFont.systemFont(ofSize: 11, weight: .medium)
