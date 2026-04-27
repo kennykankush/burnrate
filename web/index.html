@@ -585,9 +585,9 @@
 
       <span class="hero-pill fade" aria-label="status">
         <span class="live" aria-hidden="true"></span>
-        <span class="hp-version">v0.1.0</span>
+        <span class="hp-version" data-fallback="v0.1.0">v0.1.0</span>
         <span class="hp-sep"></span>
-        <span class="hp-label">alpha</span>
+        <span class="hp-label" data-fallback="alpha">alpha</span>
       </span>
 
       <div class="logo-stage">
@@ -723,6 +723,67 @@
       }
     });
   });
+</script>
+
+<script>
+  // Hero pill: fetch the latest GitHub Release tag and update the version
+  // label automatically. Falls back silently to the hardcoded value on
+  // network error or rate limit.
+  (async () => {
+    const versionEl = document.querySelector('.hp-version');
+    const labelEl = document.querySelector('.hp-label');
+    if (!versionEl || !labelEl) return;
+
+    const REPO = 'kennykankush/burnrate';
+    const CACHE_KEY = 'burnrate.latestRelease';
+    const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+    function deriveLabel(tag) {
+      const m = tag.match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+      if (!m) return 'alpha';
+      const major = parseInt(m[1], 10);
+      const preRelease = m[4];
+      if (preRelease) return preRelease.split('.')[0]; // e.g. "beta", "rc"
+      if (major === 0) return 'alpha';
+      return 'stable';
+    }
+
+    function apply({ tag, label }) {
+      versionEl.textContent = tag;
+      labelEl.textContent = label;
+    }
+
+    // 1. Apply cached value immediately to avoid the v0.1.0 → v0.1.x flicker.
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const cached = JSON.parse(raw);
+        if (cached && cached.tag && cached.label) apply(cached);
+      }
+    } catch (_) {}
+
+    // 2. Fetch the latest release. Skip the network call if cache is fresh.
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      const cached = raw ? JSON.parse(raw) : null;
+      if (cached && cached.ts && Date.now() - cached.ts < CACHE_TTL_MS) return;
+
+      const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
+        headers: { 'Accept': 'application/vnd.github+json' },
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const tag = data.tag_name;
+      if (!tag) return;
+      const label = deriveLabel(tag);
+      apply({ tag, label });
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({ tag, label, ts: Date.now() }));
+      } catch (_) {}
+    } catch (_) {
+      // network error or CORS — silently keep the existing text
+    }
+  })();
 </script>
 
 </body>
