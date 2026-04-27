@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="branding/headers/moana.png" alt="burnrate" width="100%" />
+  <img src="assets/header.png" alt="burnrate" width="100%" />
 </div>
 
 # burnrate

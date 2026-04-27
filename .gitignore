@@ -14,5 +14,5 @@ research/
 # Release artefacts (uploaded to GitHub Releases, not committed)
 /dist
 
-# Branding source (kept local only)
+# Branding source (kept local only). README + marketing assets live in /assets.
 /branding

@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Burnrate — AI usage, made visible.</title>
-<meta name="description" content="A native macOS menu bar app that turns Claude, Codex, and Cursor usage into a live burn meter." />
-<meta name="theme-color" content="#0b0820" />
+<title>burnrate — AI usage, made visible.</title>
+<meta name="description" content="A native macOS menu bar app that turns Claude Code and Codex usage into a live burn meter." />
+<meta name="theme-color" content="#0a071f" />
 <link rel="icon" type="image/png" href="assets/glyph.png" />
 
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 
 <style>
   :root {
@@ -18,38 +18,25 @@
     --bg-1: #0d0a2c;
     --bg-2: #1a1148;
     --text: #f6f1ff;
-    --text-dim: rgba(246, 241, 255, 0.62);
-    --text-mute: rgba(246, 241, 255, 0.42);
+    --text-2: rgba(246, 241, 255, 0.66);
+    --text-3: rgba(246, 241, 255, 0.42);
     --accent: #b29bff;
-    --accent-strong: #8a6bff;
+    --accent-2: #8a6bff;
     --warm: #ff8a3d;
-    --warm-soft: #ffb070;
-    --ok: #6dffaf;
+    --warm-2: #ffb070;
+    --green: #6dffaf;
 
-    --glass: rgba(255, 255, 255, 0.06);
-    --glass-strong: rgba(255, 255, 255, 0.10);
-    --glass-border: rgba(255, 255, 255, 0.12);
-    --glass-border-strong: rgba(255, 255, 255, 0.20);
+    --surface: rgba(255, 255, 255, 0.05);
+    --surface-2: rgba(255, 255, 255, 0.09);
+    --surface-3: rgba(255, 255, 255, 0.14);
+    --line: rgba(255, 255, 255, 0.10);
+    --line-2: rgba(255, 255, 255, 0.18);
 
     --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-    --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-
-    --gap-1: 4px;
-    --gap-2: 8px;
-    --gap-3: 12px;
-    --gap-4: 16px;
-    --gap-5: 24px;
-    --gap-6: 32px;
-    --gap-7: 48px;
-
-    --radius-sm: 8px;
-    --radius-md: 14px;
-    --radius-lg: 20px;
-    --radius-xl: 28px;
   }
 
   * { box-sizing: border-box; }
-
+  html { height: 100%; }
   html, body {
     margin: 0;
     padding: 0;
@@ -60,239 +47,208 @@
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     line-height: 1.5;
-    overflow: hidden;
     overscroll-behavior: none;
   }
-  html { height: 100%; }
   body {
     height: 100dvh;
+    overflow: hidden;
     background:
-      radial-gradient(1200px 700px at 80% 20%, rgba(75, 130, 200, 0.18), transparent 60%),
-      radial-gradient(1000px 600px at 15% 80%, rgba(138, 107, 255, 0.22), transparent 60%),
-      radial-gradient(700px 500px at 50% 50%, rgba(255, 138, 61, 0.06), transparent 70%),
-      linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
-  }
-  a { color: inherit; text-decoration: none; }
-  ::selection { background: var(--accent-strong); color: white; }
-
-  /* ---------- Page shell ---------- */
-  .page {
+      radial-gradient(ellipse 120% 80% at 75% 0%, rgba(255, 138, 61, 0.16) 0%, transparent 50%),
+      radial-gradient(ellipse 100% 70% at 15% 100%, rgba(178, 155, 255, 0.22) 0%, transparent 55%),
+      linear-gradient(180deg, #1d1352 0%, #110a30 45%, #07051a 100%);
     position: relative;
-    height: 100dvh;
-    display: grid;
-    grid-template-rows: auto 1fr;
-    isolation: isolate;
   }
+  .page {
+    height: 100dvh;
+  }
+  .main { overflow: hidden; }
 
-  /* ---------- Page ambient (moana stays inside .visual only) ---------- */
+  /* ---------- Ambient bg (drifting blobs + noise + faint grid) ---------- */
   .bg {
-    position: absolute;
+    position: fixed;
     inset: 0;
     z-index: -2;
     overflow: hidden;
     pointer-events: none;
   }
-  .bg::before {
-    content: '';
+  .blob {
     position: absolute;
-    width: 60vmin; height: 60vmin;
-    top: -10vmin; right: -10vmin;
     border-radius: 50%;
-    background: radial-gradient(circle, rgba(178, 155, 255, 0.18), transparent 70%);
-    filter: blur(20px);
+    filter: blur(80px);
+    opacity: 0.85;
+    will-change: transform;
   }
-  .bg::after {
-    content: '';
+  .blob-1 {
+    width: 65vmin; height: 65vmin;
+    background: radial-gradient(circle, rgba(178, 155, 255, 0.85), transparent 70%);
+    top: -15%; left: 55%;
+  }
+  .blob-2 {
+    width: 75vmin; height: 75vmin;
+    background: radial-gradient(circle, rgba(255, 138, 61, 0.55), transparent 70%);
+    bottom: -20%; right: 55%;
+  }
+  .blob-3 {
+    width: 50vmin; height: 50vmin;
+    background: radial-gradient(circle, rgba(138, 107, 255, 0.75), transparent 70%);
+    top: 35%; left: -12%;
+  }
+  .grid {
     position: absolute;
-    width: 70vmin; height: 70vmin;
-    bottom: -15vmin; left: -15vmin;
-    border-radius: 50%;
-    background: radial-gradient(circle, rgba(255, 138, 61, 0.10), transparent 70%);
-    filter: blur(20px);
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse 75% 60% at 50% 50%, black 30%, transparent 80%);
+    -webkit-mask-image: radial-gradient(ellipse 75% 60% at 50% 50%, black 30%, transparent 80%);
+  }
+  .noise {
+    position: absolute;
+    inset: 0;
+    opacity: 0.05;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+  a { color: inherit; text-decoration: none; }
+  ::selection { background: var(--accent); color: #14092e; }
+
+  /* ---------- Layout ---------- */
+  .page {
+    min-height: 100dvh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    padding: 18px 22px 22px;
   }
 
-  /* ---------- Nav ---------- */
-  .nav {
+  .topbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--gap-3) var(--gap-5);
-    height: 56px;
+    height: 36px;
+    color: var(--text-3);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    letter-spacing: -0.005em;
   }
-  .nav-brand {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--gap-2);
-    font-weight: 700;
-    letter-spacing: -0.01em;
-    font-size: 15px;
+  .topbar .left { display: inline-flex; align-items: center; gap: 8px; }
+  .topbar .right { display: inline-flex; align-items: center; gap: 14px; }
+  .topbar a {
+    transition: color 160ms var(--ease-out);
   }
-  .nav-brand img {
-    width: 32px;
-    height: 32px;
-    object-fit: contain;
-    filter: drop-shadow(0 6px 16px rgba(178, 155, 255, 0.45));
-  }
-  .nav-links {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--gap-1);
-  }
-  .nav-link {
-    font-size: 13px;
-    color: var(--text-dim);
-    padding: 8px 12px;
-    border-radius: 999px;
-    transition: color 160ms var(--ease-out), background-color 160ms var(--ease-out);
-  }
-  .nav-link:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+  .topbar a:hover { color: var(--text); }
 
-  /* ---------- Main hero ---------- */
+  /* ---------- Hero pill (the "filler" above the logo) ---------- */
+  .hero-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 14px 7px 11px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line-2);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    color: var(--text);
+    letter-spacing: -0.005em;
+    user-select: none;
+  }
+  .hero-pill .live {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 10px var(--green);
+    animation: pulse 2.4s var(--ease-out) infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+  .hero-pill .hp-version { color: var(--text); font-weight: 500; }
+  .hero-pill .hp-sep {
+    width: 3px; height: 3px;
+    border-radius: 50%;
+    background: var(--text-3);
+  }
+  .hero-pill .hp-label {
+    color: var(--warm-2);
+    text-transform: lowercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+  }
+
   .main {
     display: grid;
     place-items: center;
-    padding: 0 var(--gap-5) var(--gap-5);
-    overflow: hidden;
+    padding: 16px 16px;
     min-height: 0;
   }
-
-  .hero-card {
-    width: min(100%, 1100px);
-    height: 100%;
-    max-height: 760px;
-    display: grid;
-    grid-template-columns: 1.05fr 0.95fr;
-    border-radius: var(--radius-xl);
-    background: rgba(13, 10, 44, 0.55);
-    border: 1px solid var(--glass-border-strong);
-    backdrop-filter: blur(16px) saturate(1.3);
-    -webkit-backdrop-filter: blur(16px) saturate(1.3);
-    box-shadow:
-      0 40px 100px -20px rgba(0, 0, 0, 0.55),
-      0 18px 50px -20px rgba(138, 107, 255, 0.4),
-      inset 0 1px 0 rgba(255, 255, 255, 0.16),
-      inset 0 0 0 1px rgba(255, 255, 255, 0.03);
-    overflow: hidden;
-    transform: translateZ(0);
-  }
-
-  /* ---------- Left: visual ---------- */
-  .visual {
-    position: relative;
-    border-right: 1px solid rgba(255, 255, 255, 0.08);
-    overflow: hidden;
-    background: rgba(8, 5, 30, 0.25);
-  }
-  .visual::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: url('assets/header.png') center 40% / cover no-repeat;
-    transform: scale(1.04);
-    animation: drift 22s var(--ease-in-out) infinite alternate;
-    will-change: transform;
-  }
-  @keyframes drift {
-    from { transform: scale(1.04) translate3d(0, 0, 0); }
-    to   { transform: scale(1.10) translate3d(-1.2%, -0.8%, 0); }
-  }
-  .visual::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(180deg, rgba(7, 5, 26, 0) 0%, rgba(7, 5, 26, 0.18) 60%, rgba(7, 5, 26, 0.55) 100%);
-  }
-
-  .visual-overlay {
-    position: absolute;
-    inset: auto var(--gap-5) var(--gap-5) var(--gap-5);
-    z-index: 2;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--gap-2);
-  }
-  .stat {
-    padding: var(--gap-3) var(--gap-3);
-    border-radius: var(--radius-md);
-    background: rgba(7, 5, 26, 0.55);
-    border: 1px solid var(--glass-border);
-    backdrop-filter: blur(14px) saturate(1.4);
-    -webkit-backdrop-filter: blur(14px) saturate(1.4);
-  }
-  .stat .k {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    color: var(--text-mute);
-    font-weight: 600;
-  }
-  .stat .v {
-    margin-top: 4px;
-    font-family: 'Inter', sans-serif;
-    font-feature-settings: 'tnum' 1;
-    font-weight: 700;
-    font-size: 17px;
-    letter-spacing: -0.02em;
-    color: var(--text);
-  }
-  .stat .v em {
-    font-weight: 500;
-    font-size: 12px;
-    color: var(--text-dim);
-    font-style: normal;
-    letter-spacing: 0;
-    margin-left: 4px;
-  }
-
-  /* ---------- Right: content ---------- */
-  .content {
-    display: grid;
-    grid-template-rows: auto 1fr auto auto;
-    padding: var(--gap-7) var(--gap-6) var(--gap-6);
-    gap: var(--gap-4);
-    min-height: 0;
-  }
-
-  .eyebrow {
-    display: inline-flex;
+  .stack {
+    display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 8px;
-    padding: 5px 11px 5px 7px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text);
-    background: var(--glass);
-    border: 1px solid var(--glass-border);
-    border-radius: 999px;
-    width: max-content;
-  }
-  .eyebrow-dot {
-    width: 5px; height: 5px;
-    border-radius: 50%;
-    background: var(--ok);
-    box-shadow: 0 0 10px var(--ok);
-    animation: pulse 2.4s var(--ease-in-out) infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+    text-align: center;
+    gap: 20px;
+    max-width: 720px;
+    width: 100%;
   }
 
-  .headline {
-    font-weight: 800;
-    font-size: clamp(36px, 4.6vw, 60px);
-    line-height: 1.0;
-    letter-spacing: -0.035em;
+  /* ---------- Logo stage ---------- */
+  .logo-stage {
+    position: relative;
+    width: clamp(140px, 18vmin, 200px);
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+  }
+  .logo {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    will-change: transform;
+    filter:
+      drop-shadow(0 24px 48px rgba(178, 155, 255, 0.30))
+      drop-shadow(0 8px 18px rgba(178, 155, 255, 0.18));
+  }
+
+  /* ---------- Type ---------- */
+  .wordmark {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    font-size: 16px;
+    color: var(--text);
+  }
+  .wordmark .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: linear-gradient(180deg, var(--warm-2), var(--warm));
+    box-shadow: 0 0 12px rgba(255, 138, 61, 0.7);
+    transform: translateY(-2px);
+  }
+
+  h1 {
     margin: 0;
+    font-weight: 800;
+    font-size: clamp(44px, 6.8vw, 76px);
+    line-height: 1.08;
+    letter-spacing: -0.045em;
+    padding-bottom: 0.08em;
     background: linear-gradient(180deg, #ffffff 0%, #d8c8ff 100%);
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
   }
-  .headline em {
+  h1 em {
     font-family: 'Instrument Serif', serif;
-    font-style: italic;
     font-weight: 400;
+    font-style: italic;
     background: linear-gradient(180deg, #ffd4b0 0%, #ff8a3d 100%);
     -webkit-background-clip: text;
     background-clip: text;
@@ -300,280 +256,473 @@
     letter-spacing: -0.01em;
   }
 
-  .sub {
-    font-size: 14px;
-    color: var(--text-dim);
-    line-height: 1.55;
+  .lead {
     margin: 0;
-    max-width: 38ch;
+    font-size: 16px;
+    color: var(--text-2);
+    line-height: 1.6;
+    max-width: 56ch;
+  }
+  .lead code.inline {
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    font-size: 13px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--line);
+    color: var(--warm-2);
+    letter-spacing: -0.005em;
   }
 
-  .cta-row {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--gap-2);
+  /* ---------- Pills ---------- */
+  .pills {
+    display: flex;
     flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 6px;
   }
-  .btn {
+
+  /* ---------- Terminal block ---------- */
+  .terminal {
+    width: min(640px, 100%);
+    border-radius: 14px;
+    background: rgba(10, 7, 26, 0.78);
+    border: 1px solid var(--line-2);
+    backdrop-filter: blur(18px) saturate(1.3);
+    -webkit-backdrop-filter: blur(18px) saturate(1.3);
+    box-shadow:
+      0 30px 60px -20px rgba(0, 0, 0, 0.55),
+      inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    overflow: hidden;
+    text-align: left;
+  }
+  .term-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 9px 12px;
+    background: rgba(255, 255, 255, 0.025);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .term-bar .d {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.16);
+  }
+  .term-bar .d.r { background: #ff5f57; }
+  .term-bar .d.y { background: #febc2e; }
+  .term-bar .d.g { background: #28c840; }
+  .term-bar .title {
+    margin-left: 8px;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    color: var(--text-3);
+    letter-spacing: -0.005em;
+  }
+  .term-rows {
+    padding: 6px 4px;
+  }
+  .term-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 10px 9px 12px;
+    border-radius: 8px;
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+    transition: background-color 160ms var(--ease-out);
+  }
+  .term-row + .term-row { margin-top: 2px; }
+  .term-row:hover { background: rgba(255, 255, 255, 0.04); }
+  .term-row:active { background: rgba(255, 255, 255, 0.07); }
+  .term-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  .term-row .prompt {
+    color: var(--warm-2);
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    font-size: 13px;
+    font-weight: 500;
+    user-select: none;
+  }
+  .term-row code {
+    flex: 1;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    font-size: 13px;
+    color: var(--text);
+    letter-spacing: -0.005em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+  .term-row code .url {
+    color: var(--accent);
+    opacity: 0.85;
+  }
+  .term-row .copy {
+    flex-shrink: 0;
+    width: 28px; height: 28px;
+    display: grid; place-items: center;
+    border-radius: 7px;
+    background: transparent;
+    border: 0;
+    color: var(--text-3);
+    transition: background-color 160ms var(--ease-out), color 160ms var(--ease-out);
+  }
+  .term-row:hover .copy { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+  .term-row .copy svg { width: 13px; height: 13px; }
+  .term-row[data-copied='true'] .copy {
+    color: var(--green);
+    background: rgba(109, 255, 175, 0.12);
+  }
+
+  .pill {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    font-family: inherit;
-    font-weight: 600;
-    font-size: 14px;
-    letter-spacing: -0.005em;
-    padding: 11px 16px;
+    padding: 9px 14px;
     border-radius: 999px;
-    border: 1px solid transparent;
-    cursor: pointer;
-    transition: transform 160ms var(--ease-out),
-                background-color 200ms var(--ease-out),
-                border-color 200ms var(--ease-out),
-                box-shadow 200ms var(--ease-out);
-    will-change: transform;
-    min-height: 40px;
-  }
-  .btn:active { transform: scale(0.97); }
-  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-  .btn-primary {
-    color: #1a0f3a;
-    background: linear-gradient(180deg, #ffffff 0%, #ece4ff 100%);
-    box-shadow: 0 6px 22px rgba(178, 155, 255, 0.32),
-                inset 0 1px 0 rgba(255, 255, 255, 0.9);
-  }
-  .btn-primary:hover {
-    box-shadow: 0 10px 30px rgba(178, 155, 255, 0.5),
-                inset 0 1px 0 rgba(255, 255, 255, 0.9);
-  }
-  .btn-ghost {
+    font-size: 13px;
+    font-weight: 500;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line-2);
+    backdrop-filter: blur(12px) saturate(1.3);
+    -webkit-backdrop-filter: blur(12px) saturate(1.3);
     color: var(--text);
-    background: var(--glass);
-    border-color: var(--glass-border);
+    transition: transform 160ms var(--ease-out), background-color 200ms var(--ease-out), border-color 200ms var(--ease-out);
+    will-change: transform;
   }
-  .btn-ghost:hover {
-    background: var(--glass-strong);
-    border-color: var(--glass-border-strong);
+  .pill:hover {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: var(--surface-3);
   }
-  .btn svg { width: 14px; height: 14px; }
+  .pill:active { transform: scale(0.97); }
+  .pill svg { width: 14px; height: 14px; opacity: 0.9; }
+  .pill.primary {
+    color: #14092e;
+    background: linear-gradient(180deg, #ffffff 0%, #ece4ff 100%);
+    border-color: transparent;
+    box-shadow: 0 6px 22px rgba(178, 155, 255, 0.32), inset 0 1px 0 rgba(255,255,255,0.9);
+  }
+  .pill.primary:hover {
+    box-shadow: 0 10px 30px rgba(178, 155, 255, 0.5), inset 0 1px 0 rgba(255,255,255,0.9);
+  }
 
   .meta {
-    color: var(--text-mute);
+    margin-top: 4px;
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-3);
     font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    justify-content: center;
+  }
+  .meta .sep { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.5; }
+
+  /* ---------- Footer ---------- */
+  footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--text-3);
+    font-size: 12px;
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    padding: 0 4px;
+  }
+  footer a { transition: color 160ms var(--ease-out); }
+  footer a:hover { color: var(--text); }
+
+  /* tiny keyboard chip */
+  kbd {
+    font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    font-size: 10px;
+    padding: 2px 5px;
+    border-radius: 4px;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--line);
+    color: var(--text-2);
+  }
+
+  /* ---------- Toast ---------- */
+  .toast {
+    position: fixed;
+    left: 50%; bottom: 28px;
+    transform: translateX(-50%) translateY(20px);
+    padding: 10px 14px;
+    border-radius: 12px;
+    background: rgba(20, 14, 50, 0.92);
+    border: 1px solid var(--line-2);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    color: var(--text);
+    font-size: 13px;
+    box-shadow: 0 16px 40px -10px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    visibility: hidden;
+    z-index: 50;
+    pointer-events: none;
     display: inline-flex;
     align-items: center;
-    gap: var(--gap-3);
+    gap: 8px;
   }
-  .meta-sep { width: 3px; height: 3px; border-radius: 50%; background: var(--text-mute); }
-
-  /* feature row inside the content panel */
-  .feature-row {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--gap-2);
-    padding-top: var(--gap-4);
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  .toast .ok {
+    color: var(--green);
+    width: 14px; height: 14px;
+    display: inline-grid; place-items: center;
   }
-  .feature {
-    display: grid;
-    grid-template-columns: 28px 1fr;
-    grid-template-rows: auto auto;
-    gap: 2px var(--gap-2);
-    padding: var(--gap-2) 0;
-  }
-  .feature-icon {
-    grid-row: 1 / 3;
-    width: 28px; height: 28px;
-    border-radius: 8px;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(180deg, rgba(178, 155, 255, 0.20), rgba(178, 155, 255, 0.06));
-    border: 1px solid rgba(178, 155, 255, 0.25);
-    color: #d8c8ff;
-  }
-  .feature-icon svg { width: 14px; height: 14px; }
-  .feature .t {
-    font-size: 13px;
-    font-weight: 600;
-    letter-spacing: -0.005em;
-    color: var(--text);
-  }
-  .feature .d {
-    font-size: 12px;
-    color: var(--text-dim);
-    line-height: 1.4;
-  }
-
-  /* ---------- Reveal ---------- */
-  .r {
-    opacity: 0;
-    transform: translateY(12px);
-    transition: opacity 700ms var(--ease-out), transform 700ms var(--ease-out);
-  }
-  .r[data-mounted='true'] { opacity: 1; transform: translateY(0); }
-  .r[data-d='1'] { transition-delay: 60ms; }
-  .r[data-d='2'] { transition-delay: 120ms; }
-  .r[data-d='3'] { transition-delay: 180ms; }
-  .r[data-d='4'] { transition-delay: 240ms; }
-  .r[data-d='5'] { transition-delay: 300ms; }
-  .r[data-d='6'] { transition-delay: 360ms; }
 
   /* ---------- Responsive ---------- */
-  @media (max-width: 980px) {
-    html, body { overflow: auto; }
-    body { height: auto; min-height: 100dvh; }
+  @media (max-width: 880px) {
+    /* Mobile re-enables scroll because everything can't fit on a phone. */
+    body { height: auto; min-height: 100dvh; overflow: auto; overflow-x: hidden; }
     .page { height: auto; min-height: 100dvh; }
-    .hero-card {
-      grid-template-columns: 1fr;
-      max-height: none;
-      height: auto;
+    .main { overflow: visible; }
+    /* iOS Safari flickers with position:fixed + 100dvh when the URL bar shows
+       or hides. Switch to absolute so the bg layer rides with the document. */
+    .bg { position: absolute; height: 100%; min-height: 100dvh; }
+    .blob { filter: blur(60px); opacity: 0.65; }
+    .grid, .noise { display: none; }
+  }
+  @media (max-width: 720px) {
+    .page { padding: 14px 14px 18px; }
+    .topbar { font-size: 11px; }
+    .vbadge { font-size: 10px; padding: 3px 7px; }
+    .topbar .right { gap: 12px; }
+    .main { padding: 24px 8px; }
+    .stack { gap: 22px; }
+
+    .logo-stage { width: clamp(150px, 38vmin, 200px); }
+
+    h1 {
+      font-size: clamp(40px, 12vw, 64px);
+      letter-spacing: -0.04em;
     }
-    .visual {
-      min-height: 320px;
-      border-right: 0;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    .lead { font-size: 15px; max-width: 42ch; }
+
+    .terminal { width: 100%; }
+    .term-row { padding: 9px 10px 9px 12px; }
+    .term-row code, .term-row .prompt { font-size: 12px; }
+
+    .pills { gap: 8px; }
+    .pill { font-size: 12px; padding: 8px 12px; }
+
+    .meta {
+      font-size: 11px;
+      gap: 8px;
     }
-    .content { padding: var(--gap-5); }
-    .feature-row { grid-template-columns: 1fr; }
-    .nav-link[data-hide-sm] { display: none; }
+    .meta .sep { display: none; }
+
+    footer {
+      font-size: 11px;
+      flex-direction: column;
+      gap: 6px;
+      text-align: center;
+    }
   }
 
-  @media (max-width: 540px) {
-    .visual-overlay { grid-template-columns: 1fr; gap: 6px; }
-    .stat .v { font-size: 15px; }
-    .headline { font-size: 38px; }
+  @media (max-width: 420px) {
+    .page { padding: 12px 12px 16px; }
+    .topbar .right { gap: 10px; }
+    .topbar .right a { font-size: 10.5px; }
+    .vbadge { font-size: 10px; }
+    .vbadge .live { width: 4px; height: 4px; }
+
+    h1 { font-size: 38px; line-height: 1.05; }
+    .lead { font-size: 14px; line-height: 1.55; }
+    .lead code.inline { font-size: 12px; padding: 0 5px; }
+
+    .wordmark { font-size: 16px; }
+    .logo-stage { width: 150px; }
+
+    .term-row { padding: 8px 8px 8px 10px; gap: 8px; }
+    .term-row code { font-size: 11px; }
+    .term-row .copy { width: 26px; height: 26px; }
+    .term-bar { padding: 7px 10px; }
+    .term-bar .d { width: 8px; height: 8px; }
+    .term-bar .title { font-size: 10px; }
+
+    .pill { padding: 7px 11px; }
+    .pill svg { width: 13px; height: 13px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .r { opacity: 1; transform: none; transition: none; }
-    .bg::before { animation: none; }
-    .eyebrow-dot { animation: none; }
-    * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
+    .logo { animation: none !important; transform: none !important; }
   }
 </style>
 </head>
 <body>
 
-<div class="page">
-  <div class="bg" aria-hidden="true"></div>
-
-  <nav class="nav r" data-d="1">
-    <a href="#" class="nav-brand" aria-label="Burnrate home">
-      <img src="assets/glyph.png" alt="" />
-      <span>Burnrate</span>
-    </a>
-    <div class="nav-links">
-      <a href="#" class="nav-link" data-hide-sm>Features</a>
-      <a href="https://github.com" class="nav-link" target="_blank" rel="noopener" data-hide-sm>GitHub</a>
-      <a href="#download" class="btn btn-primary" style="padding:8px 14px;font-size:13px;min-height:36px">
-        Download
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-      </a>
-    </div>
-  </nav>
-
-  <main class="main">
-    <section class="hero-card r" data-d="2" aria-label="Burnrate">
-
-      <div class="visual">
-        <div class="visual-overlay">
-          <div class="stat r" data-d="4">
-            <div class="k">5h burn</div>
-            <div class="v" id="stat-burn">128,420<em>tok</em></div>
-          </div>
-          <div class="stat r" data-d="5">
-            <div class="k">Used</div>
-            <div class="v">64<em>%</em></div>
-          </div>
-          <div class="stat r" data-d="6">
-            <div class="k">Resets in</div>
-            <div class="v">2:41<em>h</em></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="content">
-        <div class="eyebrow r" data-d="3">
-          <span class="eyebrow-dot"></span>
-          Private beta · macOS 14+
-        </div>
-
-        <div>
-          <h1 class="headline r" data-d="4">AI usage,<br/>made <em>visible.</em></h1>
-          <p class="sub r" data-d="5" style="margin-top:14px">
-            A native macOS menu bar app that turns Claude, Codex, and Cursor activity into a live burn meter — so you know exactly how much context you've spent before the request fails.
-          </p>
-        </div>
-
-        <div class="r" data-d="6">
-          <div class="cta-row">
-            <a id="download" href="#" class="btn btn-primary">
-              Download for macOS
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-            </a>
-            <a href="https://github.com" class="btn btn-ghost" target="_blank" rel="noopener">
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.35.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.92 10.92 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
-              GitHub
-            </a>
-          </div>
-          <div class="meta" style="margin-top:10px">
-            <span>Free</span><span class="meta-sep"></span>
-            <span>4.2 MB</span><span class="meta-sep"></span>
-            <span>Apple Silicon &amp; Intel</span>
-          </div>
-        </div>
-
-        <div class="feature-row">
-          <div class="feature r" data-d="6">
-            <div class="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h3l3-9 6 18 3-9h3"/></svg>
-            </div>
-            <div class="t">Real-time</div>
-            <div class="d">Live token spend in your menu bar</div>
-          </div>
-          <div class="feature r" data-d="6">
-            <div class="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
-            </div>
-            <div class="t">Burn alerts</div>
-            <div class="d">Quiet ping at 30 minutes left</div>
-          </div>
-          <div class="feature r" data-d="6">
-            <div class="feature-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-            </div>
-            <div class="t">All providers</div>
-            <div class="d">Claude · Codex · Cursor in one</div>
-          </div>
-        </div>
-
-      </div>
-    </section>
-  </main>
+<div class="bg" aria-hidden="true">
+  <div class="grid"></div>
+  <div class="blob blob-1" id="blob1"></div>
+  <div class="blob blob-2" id="blob2"></div>
+  <div class="blob blob-3" id="blob3"></div>
+  <div class="noise"></div>
 </div>
 
+<div class="page">
+
+  <header class="topbar">
+    <div class="left">
+      <a href="#" class="wordmark sm" aria-label="burnrate">burnrate</a>
+    </div>
+    <nav class="right">
+      <a href="https://github.com/kennykankush/burnrate" target="_blank" rel="noopener">github ↗</a>
+      <a href="mailto:hadi@hadimulia.com">contact</a>
+    </nav>
+  </header>
+
+  <main class="main">
+    <div class="stack">
+
+      <span class="hero-pill fade" aria-label="status">
+        <span class="live" aria-hidden="true"></span>
+        <span class="hp-version">v0.1.0</span>
+        <span class="hp-sep"></span>
+        <span class="hp-label">alpha</span>
+      </span>
+
+      <div class="logo-stage">
+        <img class="logo" id="logo" src="assets/glyph.png" alt="Burnrate logo" />
+      </div>
+
+      <h1 class="fade">Running hot?</h1>
+
+      <p class="lead fade">
+        Strava, but for your Claude Code and Codex sessions. A personal burn index against your own baseline, peak hour patterns, cache savings, advisor health states, and a quiet ping before the 5 hour cap.
+      </p>
+
+      <div class="terminal fade" role="group" aria-label="Install commands">
+        <div class="term-bar">
+          <span class="d r"></span>
+          <span class="d y"></span>
+          <span class="d g"></span>
+          <span class="title">~/install</span>
+        </div>
+        <div class="term-rows">
+          <button class="term-row" data-copy="brew tap kennykankush/burnrate https://github.com/kennykankush/burnrate">
+            <span class="prompt">$</span>
+            <code>brew tap kennykankush/burnrate <span class="url">https://github.com/kennykankush/burnrate</span></code>
+            <span class="copy" aria-label="Copy command">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </span>
+          </button>
+          <button class="term-row" data-copy="brew install --cask burnrate">
+            <span class="prompt">$</span>
+            <code>brew install --cask burnrate</code>
+            <span class="copy" aria-label="Copy command">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <div class="pills fade">
+        <a href="https://github.com/kennykankush/burnrate" class="pill primary" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56v-2c-3.2.7-3.87-1.36-3.87-1.36-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.35.96.1-.74.4-1.25.72-1.54-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.18a10.92 10.92 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.58.23 2.75.11 3.04.74.81 1.18 1.84 1.18 3.1 0 4.42-2.7 5.4-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+          View on GitHub
+        </a>
+        <a href="https://github.com/kennykankush/burnrate/issues" class="pill" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+          Report a bug
+        </a>
+      </div>
+
+      <div class="meta fade">
+        <span>macOS 14+</span><span class="sep"></span>
+        <span>MIT licensed</span><span class="sep"></span>
+        <span>open source</span>
+      </div>
+
+    </div>
+  </main>
+
+  <footer>
+    <span>made by hadimulia</span>
+  </footer>
+
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite">
+  <span class="ok">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+  </span>
+  <span id="toast-msg">Copied to clipboard</span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 <script>
-  requestAnimationFrame(() => {
-    document.querySelectorAll('.r').forEach(el => el.dataset.mounted = 'true');
+  // ---------- GSAP entrance + ambient motion ----------
+  const mm = gsap.matchMedia();
+
+  mm.add({
+    motion: '(prefers-reduced-motion: no-preference)',
+    reduced: '(prefers-reduced-motion: reduce)',
+  }, (ctx) => {
+    const { motion } = ctx.conditions;
+
+    // Initial entrance — stagger the .fade items, plus the logo stage.
+    gsap.set('.fade, .logo-stage', { autoAlpha: 0, y: 14 });
+
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out', duration: 0.7 } });
+    tl.to('.logo-stage', { autoAlpha: 1, y: 0, scale: 1, duration: 0.9, ease: 'power2.out' })
+      .to('.fade', { autoAlpha: 1, y: 0, stagger: 0.07 }, '-=0.6');
+
+    if (!motion) return;
+
+    // Ambient logo float — gentle Y bob + tiny rotation.
+    gsap.to('#logo', {
+      y: -8,
+      rotation: 1.5,
+      duration: 3.4,
+      ease: 'sine.inOut',
+      yoyo: true,
+      repeat: -1,
+    });
+
+    // Background blobs drift slowly so the page never feels static.
+    // Long durations (24–34s) keep it ambient, not distracting.
+    gsap.to('#blob1', { x: '8vmin', y: '6vmin', duration: 26, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+    gsap.to('#blob2', { x: '-10vmin', y: '-8vmin', duration: 32, ease: 'sine.inOut', yoyo: true, repeat: -1 });
+    gsap.to('#blob3', { x: '12vmin', y: '-6vmin', duration: 28, ease: 'sine.inOut', yoyo: true, repeat: -1 });
   });
 
-  // Tiny one-shot count-up on the burn stat — runs once per visit.
-  const burn = document.getElementById('stat-burn');
-  if (burn && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    const target = 128420;
-    const start = performance.now();
-    const dur = 1300;
-    const ease = t => 1 - Math.pow(1 - t, 3);
-    const unit = burn.querySelector('em');
-    function tick(now) {
-      const t = Math.min(1, (now - start) / dur);
-      const v = Math.round(ease(t) * target);
-      burn.firstChild.textContent = v.toLocaleString();
-      if (t < 1) requestAnimationFrame(tick);
-    }
-    burn.firstChild.textContent = '0';
-    requestAnimationFrame(tick);
+  // ---------- Click-to-copy on commands ----------
+  const toast = document.getElementById('toast');
+  const toastMsg = document.getElementById('toast-msg');
+  let toastTween;
+
+  function showToast(msg) {
+    toastMsg.textContent = msg;
+    if (toastTween) toastTween.kill();
+    gsap.set(toast, { visibility: 'visible' });
+    toastTween = gsap.timeline()
+      .to(toast, { autoAlpha: 1, y: -8, duration: 0.28, ease: 'power3.out' })
+      .to(toast, { autoAlpha: 0, y: 12, duration: 0.32, ease: 'power3.in', delay: 1.6 })
+      .set(toast, { visibility: 'hidden', y: 20 });
   }
+
+  document.querySelectorAll('[data-copy]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const text = btn.dataset.copy;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.dataset.copied = 'true';
+        showToast('Copied: ' + text);
+        setTimeout(() => { btn.dataset.copied = 'false'; }, 1400);
+      } catch (e) {
+        showToast('Copy failed, select manually');
+      }
+    });
+  });
 </script>
 
 </body>

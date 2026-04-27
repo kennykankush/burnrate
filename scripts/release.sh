@@ -21,13 +21,13 @@ BIN=".build/$CONFIG/burnrate"
 BUNDLE=".build/$CONFIG/burnrate_Burnrate.bundle"
 DIST="dist"
 INFO_PLIST="$APP/Contents/Info.plist"
-SKELETON_INFO=".build/debug/burnrate.app/Contents/Info.plist"
+CANONICAL_INFO="Resources/Info.plist"
 
-# 1. Optional version bump.
+# 1. Optional version bump (in-place on the canonical Info.plist).
 VERSION="${1:-}"
 if [[ -n "$VERSION" ]]; then
   echo ":: bumping CFBundleShortVersionString → $VERSION"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$SKELETON_INFO"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CANONICAL_INFO"
 fi
 
 # 2. Build release config.
@@ -39,9 +39,14 @@ swift build -c "$CONFIG"
 #    (SwiftPM doesn't produce a .app on its own; we copy the structure.)
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp ".build/debug/burnrate.app/Contents/Info.plist" "$APP/Contents/Info.plist"
+cp "$CANONICAL_INFO" "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/burnrate"
 cp -R "$BUNDLE" "$APP/Contents/Resources/burnrate_Burnrate.bundle"
+
+# Bundle the .icns app icon if it exists.
+if [[ -f "Resources/AppIcon.icns" ]]; then
+  cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+fi
 
 # 4. Read the version we're shipping (might have been bumped above).
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INFO_PLIST")

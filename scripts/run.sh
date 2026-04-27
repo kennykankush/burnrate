@@ -12,8 +12,16 @@ pkill -x burnrate 2>/dev/null || true
 
 swift build ${CONFIG:+-c "$CONFIG"}
 
-if [[ ! -d "$APP" ]]; then
-  echo "error: $APP not found — create the .app skeleton once (Contents/Info.plist, Contents/MacOS/) then rerun" >&2
+# Create the .app skeleton if missing. Canonical Info.plist lives at
+# Resources/Info.plist; we always copy it forward so any version-bump
+# done via PlistBuddy on the .app's plist also gets reflected upstream
+# whenever we rebuild from a clean state.
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+if [[ -f "Resources/Info.plist" ]]; then
+  cp "Resources/Info.plist" "$APP/Contents/Info.plist"
+fi
+if [[ ! -f "$APP/Contents/Info.plist" ]]; then
+  echo "error: $APP/Contents/Info.plist missing and Resources/Info.plist not found" >&2
   exit 1
 fi
 
@@ -26,6 +34,12 @@ mkdir -p "$APP/Contents/Resources"
 rm -rf "$APP/burnrate_Burnrate.bundle"
 rm -rf "$APP/Contents/Resources/burnrate_Burnrate.bundle"
 cp -R "$BUNDLE" "$APP/Contents/Resources/burnrate_Burnrate.bundle"
+
+# Bundle the .icns app icon (referenced via CFBundleIconFile=AppIcon in Info.plist).
+# Run scripts/build-app-icon.sh once whenever the source brand image changes.
+if [[ -f "Resources/AppIcon.icns" ]]; then
+  cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+fi
 
 # Codesign with a stable identity so macOS Keychain "Always Allow" persists
 # across rebuilds. Without this, every rebuild produces a different signature
