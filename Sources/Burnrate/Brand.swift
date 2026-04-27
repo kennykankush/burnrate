@@ -11,6 +11,7 @@ enum Brand {
         case outline = "base_outline"
         case fullWhite = "logo_full_white"
         case main3D = "main_3d"
+        case maxMountain = "max_mountain"
     }
 
     static func image(_ mark: Mark) -> Image {
@@ -39,8 +40,11 @@ enum Brand {
     }
 
     enum Palette {
-        static let deepPurple = Color(red: 0.31, green: 0.24, blue: 0.85)
-        static let softLavender = Color(red: 0.68, green: 0.62, blue: 0.96)
+        // Single canonical brand purple — vibrant violet that works at full
+        // strength (pill text, accents) and at low opacity (washes, glows).
+        static let brandPurple = Color(red: 0.55, green: 0.42, blue: 0.95)
+        static let softLavender = brandPurple   // legacy alias
+        static let deepPurple = brandPurple     // legacy alias
         static let moltenOrange = Color(red: 0.99, green: 0.55, blue: 0.16)
         static let warmCore = Color(red: 1.00, green: 0.78, blue: 0.32)
     }

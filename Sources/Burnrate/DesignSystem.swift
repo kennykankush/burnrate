@@ -1,69 +1,105 @@
 import BurnrateCore
 import SwiftUI
 
+// MARK: - Tokens
+
 enum DesignSystem {
     enum Layout {
-        static let popoverWidth: CGFloat = 396
-        static let contentPadding: CGFloat = 12
-        static let rowRadius: CGFloat = 8
-        static let controlHeight: CGFloat = 28
+        // Direction B sizing — wider for big numbers + generous breathing room.
+        static let popoverWidth: CGFloat = 420
+        static let popoverHeight: CGFloat = 700
 
-        /// Maximises the scroll-area height to whatever the current screen allows,
-        /// minus the menu bar, our own header/footer, and a small breathing margin.
-        /// Falls back to 720pt if NSScreen is unavailable (background process, etc.).
-        static var scrollMaxHeight: CGFloat {
-            let chromeReservation: CGFloat = 130
-            guard let screen = NSScreen.main else { return 720 }
-            let usable = screen.visibleFrame.height - chromeReservation
-            return max(420, min(usable, 1100))
-        }
+        static let contentPadding: CGFloat = 16
+        static let cardPadding: CGFloat = 12
+        static let cardRadius: CGFloat = 12
+        static let chipRadius: CGFloat = 7
+        static let rowRadius: CGFloat = 9
+        static let controlHeight: CGFloat = 26
+
+        static let tabScrollMaxHeight: CGFloat = popoverHeight - 160
+        static var scrollMaxHeight: CGFloat { tabScrollMaxHeight }
     }
 
     enum Colors {
-        static let background = Color(red: 0.050, green: 0.052, blue: 0.058)
-        static let surface = Color.white.opacity(0.082)
-        static let elevatedSurface = Color.white.opacity(0.125)
+        // Brand-tinted dark palette.
+        // All neutrals carry a faint deepPurple cast for subconscious brand cohesion.
+        static let background = Color(red: 0.062, green: 0.054, blue: 0.082)
+        static let surface = Color.white.opacity(0.075)
+        static let elevatedSurface = Color.white.opacity(0.115)
         static let raisedSurface = elevatedSurface
-        static let stroke = Color.white.opacity(0.145)
+        static let stroke = Color.white.opacity(0.135)
         static let glassHighlight = Color.white.opacity(0.30)
         static let glassWash = Color.white.opacity(0.075)
         static let glassShade = Color.black.opacity(0.18)
+
         static let primaryText = Color.white.opacity(0.94)
-        static let secondaryText = Color.white.opacity(0.68)
-        static let tertiaryText = Color.white.opacity(0.46)
-        static let success = Color(red: 0.54, green: 0.82, blue: 0.68)
-        static let warning = Color(red: 0.91, green: 0.72, blue: 0.38)
-        static let danger = Color(red: 0.92, green: 0.43, blue: 0.45)
+        static let secondaryText = Color.white.opacity(0.70)
+        static let tertiaryText = Color.white.opacity(0.48)
+
+        // Semantic state.
+        static let success = Color(red: 0.50, green: 0.84, blue: 0.66)
+        static let warning = Color(red: 0.96, green: 0.74, blue: 0.36)
+        static let danger = Color(red: 0.96, green: 0.42, blue: 0.46)
+
+        // Brand accents pulled from Brand.Palette so the design system + brand layer
+        // stay in sync when the brand is tweaked.
+        static let brandHot = Brand.Palette.moltenOrange
+        static let brandCore = Brand.Palette.warmCore
+        static let brandLavender = Brand.Palette.softLavender
+        static let brandDeep = Brand.Palette.deepPurple
 
         static func accent(for provider: ProviderKind) -> Color {
             switch provider {
-            case .codex: Color(red: 0.31, green: 0.78, blue: 0.88)
-            case .claude: Color(red: 0.95, green: 0.56, blue: 0.38)
+            case .codex: Color(red: 0.42, green: 0.78, blue: 0.92)
+            case .claude: Brand.Palette.moltenOrange
             }
         }
 
         static func meter(_ percent: Double, provider: ProviderKind) -> Color {
             switch percent {
-            case 0..<55:
-                accent(for: provider)
-            case 55..<82:
-                warning
-            default:
-                danger
+            case 0..<55: accent(for: provider)
+            case 55..<82: warning
+            default: danger
             }
         }
     }
 
     enum Typography {
-        static let title = Font.system(size: 14, weight: .semibold, design: .default)
-        static let section = Font.system(size: 12, weight: .semibold, design: .default)
+        // SF Pro / SF Mono — Apple's system fonts. Native macOS feel.
+
+        static let display = Font.system(size: 22, weight: .heavy)
+
+        static let title = Font.system(size: 14, weight: .semibold)
+        static let section = Font.system(size: 12, weight: .semibold)
         static let body = Font.system(size: 12, weight: .regular)
-        static let label = Font.system(size: 11, weight: .medium, design: .default)
-        static let caption = Font.system(size: 10, weight: .regular, design: .default)
-        static let metric = Font.system(size: 24, weight: .semibold, design: .default)
-        static let number = Font.system(size: 11, weight: .medium, design: .default)
+        static let label = Font.system(size: 11, weight: .medium)
+        static let caption = Font.system(size: 10, weight: .regular)
+        static let micro = Font.system(size: 9, weight: .medium)
+
+        static let number = Font.system(size: 11, weight: .medium, design: .monospaced)
+        static let statValue = Font.system(size: 13, weight: .semibold, design: .monospaced)
+        static let metric = Font.system(size: 24, weight: .semibold, design: .monospaced)
+
+        static let tab = Font.system(size: 12, weight: .medium)
     }
 }
+
+// MARK: - Geist convenience
+
+extension Font {
+    /// SF Pro — Apple's system font. Native macOS feel. Modern, serious,
+    /// scales correctly with system text settings.
+    static func geist(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        return .system(size: size, weight: weight, design: .default)
+    }
+
+    /// SF Mono — system monospaced. Tabular figures for stats / numbers.
+    static func geistMono(size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        return .system(size: size, weight: weight, design: .monospaced)
+    }
+}
+
+// MARK: - Tone
 
 enum UsageTone {
     case calm
@@ -120,6 +156,8 @@ enum UsageTone {
     }
 }
 
+// MARK: - Meter
+
 struct MeterBar: View {
     let tone: UsageTone
     let usedPercent: Double
@@ -129,12 +167,18 @@ struct MeterBar: View {
             let fillWidth = max(4, proxy.size.width * min(1, max(0, self.usedPercent / 100)))
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.white.opacity(0.08))
-                Capsule().fill(self.tone.color).frame(width: fillWidth)
+                // All meter fills use the canonical brand purple — state info
+                // is communicated via the percent number / text color, not the bar.
+                Capsule()
+                    .fill(Brand.Palette.brandPurple)
+                    .frame(width: fillWidth)
             }
         }
         .frame(height: 5)
     }
 }
+
+// MARK: - Display text helpers
 
 enum DisplayText {
     static func reset(_ date: Date?) -> String? {
@@ -152,6 +196,23 @@ enum DisplayText {
         guard let text = reset(date) else { return "--" }
         return text.replacingOccurrences(of: "resets in ", with: "")
             .replacingOccurrences(of: "resets ", with: "")
+    }
+
+    static func runsOut(_ date: Date) -> String {
+        let remaining = date.timeIntervalSinceNow
+        guard remaining > 0 else { return "now" }
+        let minutes = Int(remaining / 60)
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        let rem = minutes % 60
+        if hours < 24 {
+            if rem == 0 { return "\(hours)h" }
+            return "\(hours)h \(rem)m"
+        }
+        let days = hours / 24
+        let remHours = hours % 24
+        if remHours == 0 { return "\(days)d" }
+        return "\(days)d \(remHours)h"
     }
 
     static func relative(_ date: Date) -> String {
@@ -198,11 +259,115 @@ enum DisplayText {
     }
 }
 
+// MARK: - Glass surfaces
+
 extension View {
-    func premiumCard(accent: Color, includeGlow: Bool = true) -> some View {
+    /// On macOS 26 the whole popover is a single Liquid Glass slab, so per-card
+    /// glass would be glass-on-glass (visually muddy + against Apple's guidance
+    /// that glass should emphasize *key* surfaces, not decorate everything).
+    /// Cards become subtle stroke-bordered cells on the slab.
+    @ViewBuilder
+    func brandGlass(
+        cornerRadius: CGFloat = DesignSystem.Layout.cardRadius,
+        tint: Color? = nil,
+        interactive: Bool = true
+    ) -> some View {
+        if #available(macOS 26.0, *) {
+            self.cardOnGlass(cornerRadius: cornerRadius)
+        } else {
+            self.glassSurface(cornerRadius: cornerRadius, tint: .clear)
+        }
+    }
+
+    @ViewBuilder
+    func brandGlassThin(cornerRadius: CGFloat = DesignSystem.Layout.chipRadius) -> some View {
+        if #available(macOS 26.0, *) {
+            self.cardOnGlass(cornerRadius: cornerRadius, opacity: 0.6)
+        } else {
+            self.glassSurface(cornerRadius: cornerRadius, tint: .clear)
+        }
+    }
+
+    /// Subtle stroke + faint fill — used for cards on the Liquid Glass slab.
+    fileprivate func cardOnGlass(cornerRadius: CGFloat, opacity: Double = 1.0) -> some View {
         self
             .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(0.04 * opacity))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(Color.white.opacity(0.12 * opacity), lineWidth: 0.7)
+            }
+    }
+}
+
+@available(macOS 26.0, *)
+struct LiquidGlassModifier: ViewModifier {
+    let cornerRadius: CGFloat
+    let tint: Color?
+    let interactive: Bool
+    var variant: GlassVariant = .regular
+
+    enum GlassVariant {
+        case regular
+        case clear
+    }
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: self.cornerRadius, style: .continuous)
+        switch (self.variant, self.tint, self.interactive) {
+        case (.regular, let tint?, true):
+            content.glassEffect(.regular.tint(tint).interactive(), in: shape)
+        case (.regular, let tint?, false):
+            content.glassEffect(.regular.tint(tint), in: shape)
+        case (.regular, nil, true):
+            content.glassEffect(.regular.interactive(), in: shape)
+        case (.regular, nil, false):
+            content.glassEffect(.regular, in: shape)
+        case (.clear, let tint?, true):
+            content.glassEffect(.clear.tint(tint).interactive(), in: shape)
+        case (.clear, let tint?, false):
+            content.glassEffect(.clear.tint(tint), in: shape)
+        case (.clear, nil, true):
+            content.glassEffect(.clear.interactive(), in: shape)
+        case (.clear, nil, false):
+            content.glassEffect(.clear, in: shape)
+        }
+    }
+}
+
+// MARK: - Legacy / Liquid Glass bridge
+//
+// `premiumCard` and `glassSurface` are the names used by every existing card
+// view in the codebase. We redefine them here so they automatically resolve to
+// real Liquid Glass on macOS 26 (Tahoe) — no per-callsite changes needed.
+// On macOS 14/15 they fall back to the custom gradient-glass that shipped in
+// v0.1.x.
+
+extension View {
+    @ViewBuilder
+    func premiumCard(accent: Color, includeGlow: Bool = true) -> some View {
+        if #available(macOS 26.0, *) {
+            self.cardOnGlass(cornerRadius: DesignSystem.Layout.cardRadius)
+        } else {
+            self.legacyPremiumCard(accent: accent, includeGlow: includeGlow)
+        }
+    }
+
+    @ViewBuilder
+    func glassSurface(cornerRadius: CGFloat, tint: Color = .clear) -> some View {
+        if #available(macOS 26.0, *) {
+            self.cardOnGlass(cornerRadius: cornerRadius, opacity: 0.6)
+        } else {
+            self.legacyGlassSurface(cornerRadius: cornerRadius, tint: tint)
+        }
+    }
+
+    fileprivate func legacyPremiumCard(accent: Color, includeGlow: Bool) -> some View {
+        self
+            .background {
+                RoundedRectangle(cornerRadius: DesignSystem.Layout.cardRadius, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [
@@ -214,7 +379,7 @@ extension View {
                             endPoint: .bottomTrailing))
                     .overlay(alignment: .topLeading) {
                         if includeGlow {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            RoundedRectangle(cornerRadius: DesignSystem.Layout.cardRadius, style: .continuous)
                                 .fill(accent.opacity(0.10))
                                 .frame(width: 118, height: 42)
                                 .offset(x: -22, y: -18)
@@ -222,7 +387,7 @@ extension View {
                         }
                     }
                     .overlay(alignment: .top) {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        RoundedRectangle(cornerRadius: DesignSystem.Layout.cardRadius, style: .continuous)
                             .stroke(
                                 LinearGradient(
                                     colors: [
@@ -236,13 +401,13 @@ extension View {
                     }
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: DesignSystem.Layout.cardRadius, style: .continuous)
                     .stroke(Color.white.opacity(0.10))
             }
             .shadow(color: Color.black.opacity(0.16), radius: 10, y: 6)
     }
 
-    func glassSurface(cornerRadius: CGFloat, tint: Color = .clear) -> some View {
+    fileprivate func legacyGlassSurface(cornerRadius: CGFloat, tint: Color = .clear) -> some View {
         self
             .background {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)

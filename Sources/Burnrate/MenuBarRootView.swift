@@ -2,63 +2,64 @@ import AppKit
 import BurnrateCore
 import SwiftUI
 
+// MARK: - Root
+
 struct MenuBarRootView: View {
     @Bindable var model: MenuBarModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            HeaderView(model: self.model)
+        // MenuBarExtra(.window) provides the system Liquid Glass chrome for us
+        // on macOS 26 — we just supply the content. No glassEffect needed at
+        // the root, no manual backdrop. Older macOS gets a custom backdrop.
+        MenuBarContent(model: self.model)
+            .frame(width: DesignSystem.Layout.popoverWidth, height: DesignSystem.Layout.popoverHeight)
+            .modifier(LegacyBackdropIfNeeded())
+    }
+}
 
-            Divider()
-                .overlay(DesignSystem.Colors.stroke)
-
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(spacing: 10) {
-                    if let snapshot = self.model.selectedSnapshot {
-                        ProviderSwitch(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
-                        ProviderCard(snapshot: snapshot)
-
-                        switch snapshot.kind {
-                        case .codex:
-                            if let insight = snapshot.codexSession?.insight {
-                                CodexAdvisorCard(insight: insight)
-                            }
-                            if let memory = snapshot.codexMemory {
-                                CodexMemoryCard(memory: memory)
-                            }
-                            if let context = snapshot.workContext {
-                                WorkContextCard(context: context)
-                            }
-                            if let session = snapshot.codexSession {
-                                CodexTelemetryCard(session: session)
-                                if !session.flightEvents.isEmpty {
-                                    CodexFlightRecorderCard(session: session)
-                                }
-                            }
-                        case .claude:
-                            ClaudeContentStack(snapshot: snapshot)
-                        }
-
-                        if snapshot.kind != .claude {
-                            TodayCard(snapshot: snapshot)
-                        }
-                        MiniProviderRow(overview: self.model.overview)
-                    } else {
-                        EmptyStateView(isRefreshing: self.model.isRefreshing, error: self.model.lastError)
-                    }
-                }
-                .padding(DesignSystem.Layout.contentPadding)
-            }
-            .frame(maxHeight: DesignSystem.Layout.scrollMaxHeight)
-
-            Divider()
-                .overlay(DesignSystem.Colors.stroke)
-
-            FooterView(model: self.model)
+private struct LegacyBackdropIfNeeded: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+        } else {
+            content.background { AppBackdrop() }
         }
-        .frame(width: DesignSystem.Layout.popoverWidth)
-        .background {
-            GlassBackdrop()
+    }
+}
+
+/// Refresh button spin — uses native `.rotate` symbol effect on macOS 15+,
+/// falls back to manual rotation on macOS 14.
+private struct RefreshSpinModifier: ViewModifier {
+    let isRefreshing: Bool
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.symbolEffect(.rotate, options: .repeating, isActive: self.isRefreshing)
+        } else {
+            content
+                .rotationEffect(.degrees(self.isRefreshing ? 360 : 0))
+                .animation(
+                    self.isRefreshing ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
+                    value: self.isRefreshing)
+        }
+    }
+}
+
+@MainActor
+private struct MenuBarContent: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HeaderBar(model: self.model)
+            TabBar(model: self.model)
+            Divider().overlay(DesignSystem.Colors.stroke.opacity(0.6))
+
+            TabContent(model: self.model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            Divider().overlay(DesignSystem.Colors.stroke.opacity(0.6))
+            StatuslineFooter(model: self.model)
         }
     }
 }
@@ -67,940 +68,574 @@ struct MenuBarLabel: View {
     let model: MenuBarModel
 
     var body: some View {
+        // Legacy SwiftUI label — superseded by StatusBarController's
+        // custom NSStatusItem. Kept here for the MenuBarExtra fallback.
         HStack(spacing: 4) {
-            Image(systemName: "waveform.path.ecg")
-            Text(self.model.menuBarText)
-                .font(.system(size: 11, weight: .medium, design: .default))
+            Image(systemName: "flame")
+            Text(self.model.menuBarDisplay.value)
+                .font(.geist(size: 11, weight: .medium))
         }
     }
 }
 
+// MARK: - Header
+
 @MainActor
-private struct HeaderView: View {
+private struct HeaderBar: View {
     @Bindable var model: MenuBarModel
 
     var body: some View {
-        HStack(spacing: 9) {
-            BrandMark(mark: .icon3D, size: 26)
-                .shadow(color: Brand.Palette.deepPurple.opacity(0.45), radius: 6, y: 2)
-
-            VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 10) {
+            HStack(spacing: 7) {
+                BrandMark(mark: .icon3D, size: 22)
+                    .shadow(color: Brand.Palette.brandPurple.opacity(0.45), radius: 6, y: 2)
                 Text("burnrate")
-                    .font(DesignSystem.Typography.title)
+                    .font(.geist(size: 15, weight: .semibold))
                     .foregroundStyle(DesignSystem.Colors.primaryText)
-                Text(self.subtitle)
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
             }
 
             Spacer()
+
+            SourceToggle(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
 
             Button {
                 Task { await self.model.refresh() }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11, weight: .semibold))
-                    .rotationEffect(.degrees(self.model.isRefreshing ? 360 : 0))
+                    .modifier(RefreshSpinModifier(isRefreshing: self.model.isRefreshing))
             }
             .buttonStyle(.plain)
             .foregroundStyle(DesignSystem.Colors.secondaryText)
             .frame(width: 26, height: 26)
-            .glassSurface(cornerRadius: 7, tint: .white.opacity(0.06))
-            .animation(
-                self.model.isRefreshing ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
-                value: self.model.isRefreshing)
+            .brandGlass(cornerRadius: 7, interactive: true)
             .disabled(self.model.isRefreshing)
-            .help("Refresh")
+            .help("Refresh — ⌘R")
+            .keyboardShortcut("r", modifiers: .command)
+
+            // Hidden binding for ⌘\ — flips between Codex and Claude
+            // when both have data. Zero-size, no visual presence; the
+            // tooltip on the SourceToggle documents the shortcut.
+            Button("Toggle source") {
+                self.model.cycleProvider()
+            }
+            .keyboardShortcut("\\", modifiers: .command)
+            .frame(width: 0, height: 0)
+            .opacity(0)
+            .accessibilityHidden(true)
         }
         .padding(.horizontal, DesignSystem.Layout.contentPadding)
-        .padding(.vertical, 9)
-    }
-
-    private var subtitle: String {
-        if self.model.isRefreshing { return "Refreshing usage" }
-        if let error = self.model.lastError, !error.isEmpty { return "Needs attention" }
-        return "Codex and Claude Code"
+        .padding(.vertical, 10)
     }
 }
 
-private struct ProviderSwitch: View {
+// MARK: - Source toggle (CC | Codex, 2-state)
+
+@MainActor
+private struct SourceToggle: View {
     @Binding var selectedProvider: ProviderKind
     let snapshots: [ProviderUsageSnapshot]
+    @Namespace private var pillNS
+
+    private func shortName(for provider: ProviderKind) -> String {
+        switch provider {
+        case .codex: "Codex"
+        case .claude: "Claude"
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 2) {
             ForEach(ProviderKind.allCases) { provider in
                 let isSelected = self.selectedProvider == provider
+                let isAvailable = self.snapshots.contains { $0.kind == provider }
                 Button {
-                    self.selectedProvider = provider
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+                        self.selectedProvider = provider
+                    }
                 } label: {
-                    HStack(spacing: 5) {
-                        ProviderMark(kind: provider, size: 12, renderingMode: .template)
-                        Text(provider.displayName)
-                            .font(DesignSystem.Typography.label)
+                    HStack(spacing: 4) {
+                        ProviderMark(kind: provider, size: 10, renderingMode: .template)
+                        Text(self.shortName(for: provider))
+                            .font(.geist(size: 10, weight: .medium))
                             .lineLimit(1)
                     }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: DesignSystem.Layout.controlHeight)
-                    .foregroundStyle(isSelected ? DesignSystem.Colors.primaryText : DesignSystem.Colors.secondaryText)
-                    .background(
-                        isSelected ? Color.white.opacity(0.13) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .padding(.horizontal, 7)
+                    .frame(height: 22)
+                    .foregroundStyle(isSelected ? DesignSystem.Colors.primaryText : DesignSystem.Colors.tertiaryText)
+                    .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .disabled(self.snapshots.isEmpty)
+                .background {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.white.opacity(0.18))
+                            .matchedGeometryEffect(id: "sourcePill", in: self.pillNS)
+                    }
+                }
+                .opacity(isAvailable ? 1.0 : 0.4)
+                .disabled(!isAvailable)
+                .help(isAvailable ? "\(provider.displayName) — ⌘\\ to toggle" : "no \(provider.displayName.lowercased()) usage detected")
             }
         }
-        .padding(3)
-        .glassSurface(cornerRadius: 8, tint: .white.opacity(0.045))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(DesignSystem.Colors.stroke.opacity(0.7))
-        }
+        .padding(2)
+        .brandGlass(cornerRadius: 8)
     }
 }
 
-private struct ProviderCard: View {
-    let snapshot: ProviderUsageSnapshot
+// MARK: - Tab bar
 
-    private var tone: UsageTone {
-        UsageTone(percent: self.snapshot.primaryUsedPercent)
-    }
+@MainActor
+private struct TabBar: View {
+    @Bindable var model: MenuBarModel
+    @Namespace private var tabPillNS
 
     var body: some View {
-        VStack(spacing: 11) {
-            HStack(alignment: .center, spacing: 10) {
-                ProviderMark(kind: self.snapshot.kind, size: 22, renderingMode: .original)
-                    .foregroundStyle(DesignSystem.Colors.accent(for: self.snapshot.kind))
-                    .padding(7)
-                    .background {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(DesignSystem.Colors.accent(for: self.snapshot.kind).opacity(0.14))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .stroke(DesignSystem.Colors.accent(for: self.snapshot.kind).opacity(0.32))
-                    }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(self.snapshot.kind.displayName)
-                            .font(.system(size: 16, weight: .semibold, design: .default))
-                            .foregroundStyle(DesignSystem.Colors.primaryText)
-                            .lineLimit(1)
-
-                        if let plan = self.snapshot.planName {
-                            Text(plan)
-                                .font(DesignSystem.Typography.caption)
-                                .foregroundStyle(DesignSystem.Colors.secondaryText)
-                                .padding(.horizontal, 6)
-                                .frame(height: 18)
-                                .background(Color.white.opacity(0.11), in: Capsule())
-                                .overlay {
-                                    Capsule()
-                                        .stroke(Color.white.opacity(0.13))
-                                }
+        HStack(spacing: 4) {
+            ForEach(AppTab.allCases) { tab in
+                TabButton(
+                    tab: tab,
+                    isActive: self.model.activeTab == tab,
+                    pillNamespace: self.tabPillNS,
+                    action: {
+                        // Snappier spring with a touch of overshoot — that's
+                        // the "addictive" cadence Linear/Things use.
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+                            self.model.setActiveTab(tab)
                         }
-                    }
-
-                    Text(self.subtitle)
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 0) {
-                    Text("\(Int(self.snapshot.primaryUsedPercent.rounded()))%")
-                        .font(.system(size: 25, weight: .semibold, design: .default))
-                        .foregroundStyle(DesignSystem.Colors.primaryText)
-                        .monospacedDigit()
-                    Text(self.primaryWindowLabel)
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(self.tone.color)
-                }
-            }
-
-            VStack(spacing: 9) {
-                ForEach(self.snapshot.windows) { window in
-                    CompactLimitRow(window: window, tone: UsageTone(percent: window.usedPercent))
-                }
-            }
-
-            HStack(spacing: 7) {
-                CompactMetric(title: self.requestTitle, value: "\(self.snapshot.today.requests)")
-                CompactMetric(title: "Tokens", value: DisplayText.compact(self.snapshot.today.totalTokens))
-                CompactMetric(title: self.thirdMetricTitle, value: self.thirdMetricValue)
+                    })
             }
         }
-        .padding(12)
-        .premiumCard(accent: self.tone.color)
-    }
-
-    private var subtitle: String {
-        let account = self.snapshot.accountLabel ?? "Local account"
-        guard let project = self.snapshot.projectLabel else { return account }
-        return "\(account) / \(project)"
-    }
-
-    private var primaryWindowLabel: String {
-        guard let title = self.snapshot.primaryWindow?.title else { return self.tone.label }
-        if title == "5h" { return "5h burst" }
-        return title.lowercased()
-    }
-
-    private var requestTitle: String {
-        self.snapshot.kind == .codex ? "Turns" : "Requests"
-    }
-
-    private var thirdMetricTitle: String {
-        if self.snapshot.kind == .codex, self.snapshot.codexSession != nil { return "Cache" }
-        return "Spend"
-    }
-
-    private var thirdMetricValue: String {
-        if let session = self.snapshot.codexSession {
-            return DisplayText.compact(session.cachedInputTokens)
-        }
-        return DisplayText.money(self.snapshot.today.spend?.used, currency: self.snapshot.today.spend?.currencyCode)
-    }
-}
-
-private struct CompactLimitRow: View {
-    let window: UsageWindow
-    let tone: UsageTone
-
-    var body: some View {
-        VStack(spacing: 5) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(self.window.title)
-                    .font(DesignSystem.Typography.body)
-                    .foregroundStyle(DesignSystem.Colors.secondaryText)
-                Spacer()
-                Text("\(Int(self.window.remainingPercent.rounded()))% left")
-                    .font(DesignSystem.Typography.number)
-                    .foregroundStyle(DesignSystem.Colors.secondaryText)
-                    .monospacedDigit()
-            }
-
-            MeterBar(tone: self.tone, usedPercent: self.window.usedPercent)
-
-            HStack {
-                Text("\(Int(self.window.usedPercent.rounded()))% used")
-                Spacer()
-                Text(DisplayText.reset(self.window.resetsAt) ?? "no reset")
-            }
-            .font(DesignSystem.Typography.caption)
-            .foregroundStyle(DesignSystem.Colors.tertiaryText)
-        }
-    }
-}
-
-private struct CompactMetric: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(self.title.uppercased())
-                .font(DesignSystem.Typography.caption)
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-            Text(self.value)
-                .font(.system(size: 13, weight: .semibold, design: .default))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .monospacedDigit()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .frame(height: 42)
-        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.045))
-    }
-}
-
-private struct TodayCard: View {
-    let snapshot: ProviderUsageSnapshot
-
-    var body: some View {
-        HStack(spacing: 0) {
-            DetailColumn(title: "Active", value: DisplayText.minutes(self.snapshot.today.activeMinutes), detail: self.snapshot.today.peakHourLabel ?? "today")
-            SoftDivider()
-            DetailColumn(title: "Input", value: DisplayText.compact(self.snapshot.today.inputTokens), detail: "tokens")
-            SoftDivider()
-            DetailColumn(title: "Output", value: DisplayText.compact(self.snapshot.today.outputTokens), detail: "tokens")
-        }
-        .padding(.vertical, 10)
-        .premiumCard(accent: DesignSystem.Colors.accent(for: self.snapshot.kind), includeGlow: false)
-    }
-}
-
-private struct DetailColumn: View {
-    let title: String
-    let value: String
-    let detail: String
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(self.title.uppercased())
-                .font(DesignSystem.Typography.caption)
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-            Text(self.value)
-                .font(.system(size: 14, weight: .semibold, design: .default))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .monospacedDigit()
-            Text(self.detail)
-                .font(DesignSystem.Typography.caption)
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-private struct SoftDivider: View {
-    var body: some View {
-        Rectangle()
-            .fill(DesignSystem.Colors.stroke)
-            .frame(width: 1, height: 34)
-    }
-}
-
-private struct MiniProviderRow: View {
-    let overview: UsageOverview
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ForEach(self.overview.snapshots) { snapshot in
-                MiniProviderCard(snapshot: snapshot)
-            }
-        }
-    }
-}
-
-private struct MiniProviderCard: View {
-    let snapshot: ProviderUsageSnapshot
-
-    private var tone: UsageTone {
-        UsageTone(percent: self.snapshot.primaryUsedPercent)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(self.snapshot.kind.displayName)
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.secondaryText)
-                    .lineLimit(1)
-                Spacer()
-                Text("\(Int(self.snapshot.primaryUsedPercent.rounded()))%")
-                    .font(DesignSystem.Typography.number)
-                    .foregroundStyle(DesignSystem.Colors.primaryText)
-                    .monospacedDigit()
-            }
-
-            MeterBar(tone: self.tone, usedPercent: self.snapshot.primaryUsedPercent)
-
-            Text(DisplayText.resetShort(self.snapshot.primaryResetAt))
-                .font(DesignSystem.Typography.caption)
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-        }
-        .padding(9)
-        .frame(maxWidth: .infinity)
-        .glassSurface(cornerRadius: 8, tint: .white.opacity(0.035))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(DesignSystem.Colors.stroke.opacity(0.65))
-        }
-    }
-}
-
-private struct CodexAdvisorCard: View {
-    let insight: CodexSessionInsight
-
-    private var tone: UsageTone {
-        UsageTone(health: self.insight.health)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: self.iconName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(self.tone.color)
-                    .frame(width: 24, height: 24)
-                    .glassSurface(cornerRadius: 7, tint: self.tone.color.opacity(0.08))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(self.insight.health.title)
-                            .font(.system(size: 14, weight: .semibold, design: .default))
-                            .foregroundStyle(DesignSystem.Colors.primaryText)
-                            .lineLimit(1)
-
-                        Text("Codex advisor")
-                            .font(.system(size: 9, weight: .medium, design: .default))
-                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                            .padding(.horizontal, 6)
-                            .frame(height: 17)
-                            .background(Color.white.opacity(0.08), in: Capsule())
-                    }
-
-                    Text(self.insight.recommendation)
-                        .font(DesignSystem.Typography.body)
-                        .foregroundStyle(DesignSystem.Colors.secondaryText)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Spacer(minLength: 4)
-            }
-
-            HStack(spacing: 6) {
-                AdvisorMetric(title: "Why", value: self.insight.primaryDriver, detail: self.insight.driverDetail)
-                AdvisorMetric(title: "Forecast", value: self.insight.forecast, detail: self.insight.resetPlan)
-            }
-
-            HStack(spacing: 6) {
-                TinyMeterMetric(
-                    title: "Last turn",
-                    value: "\(Int(self.insight.lastTurnSharePercent.rounded()))%",
-                    percent: self.insight.lastTurnSharePercent,
-                    tone: self.tone)
-                TinyMeterMetric(
-                    title: "Burn/min",
-                    value: DisplayText.compact(self.insight.tokensPerMinute),
-                    percent: min(100, Double(self.insight.tokensPerMinute) / 650),
-                    tone: self.tone)
-            }
-        }
-        .padding(10)
-        .premiumCard(accent: self.tone.color, includeGlow: true)
-    }
-
-    private var iconName: String {
-        switch self.insight.health {
-        case .efficient: "bolt.badge.checkmark"
-        case .healthy: "checkmark.seal"
-        case .watch: "eye"
-        case .tight: "exclamationmark.triangle"
-        case .stuck: "wrench.and.screwdriver"
-        }
-    }
-}
-
-private struct AdvisorMetric: View {
-    let title: String
-    let value: String
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(self.title.uppercased())
-                .font(.system(size: 9, weight: .medium, design: .default))
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-            Text(self.value)
-                .font(.system(size: 12, weight: .semibold, design: .default))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-            Text(self.detail)
-                .font(.system(size: 9, weight: .regular, design: .default))
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .frame(minHeight: 56, alignment: .topLeading)
-        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.035))
-    }
-}
-
-private struct TinyMeterMetric: View {
-    let title: String
-    let value: String
-    let percent: Double
-    let tone: UsageTone
-
-    var body: some View {
-        VStack(spacing: 5) {
-            HStack {
-                Text(self.title.uppercased())
-                    .font(.system(size: 9, weight: .medium, design: .default))
-                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                Spacer()
-                Text(self.value)
-                    .font(DesignSystem.Typography.number)
-                    .foregroundStyle(DesignSystem.Colors.primaryText)
-                    .monospacedDigit()
-            }
-            MeterBar(tone: self.tone, usedPercent: self.percent)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
-        .frame(maxWidth: .infinity)
-        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.032))
-    }
-}
-
-private struct CodexMemoryCard: View {
-    let memory: CodexProjectMemory
-
-    var body: some View {
-        HStack(spacing: 0) {
-            DetailColumn(title: "Project", value: self.memory.projectName, detail: "\(self.memory.sessionCount) sessions")
-            SoftDivider()
-            DetailColumn(title: "Avg turn", value: DisplayText.compact(self.memory.averageTurnTokens), detail: "tokens")
-            SoftDivider()
-            DetailColumn(title: "Burn index", value: self.burnMultiple, detail: self.burnDetail)
-        }
-        .padding(.vertical, 10)
-        .premiumCard(accent: DesignSystem.Colors.accent(for: .codex), includeGlow: false)
-    }
-
-    private var burnMultiple: String {
-        String(format: "%.1fx", self.memory.relativeBurnMultiple)
-    }
-
-    private var burnDetail: String {
-        if self.memory.relativeBurnMultiple >= 1.5 { return "above normal" }
-        if self.memory.relativeBurnMultiple <= 0.75 { return "below normal" }
-        return "normal"
-    }
-}
-
-private struct WorkContextCard: View {
-    let context: WorkContextSnapshot
-
-    private var tone: UsageTone {
-        UsageTone(percent: self.context.contextUsedPercent)
-    }
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Currently working under")
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                    Text(self.directoryName)
-                        .font(.system(size: 14, weight: .semibold, design: .default))
-                        .foregroundStyle(DesignSystem.Colors.primaryText)
-                        .lineLimit(1)
-                    if let model = self.context.modelName {
-                        Text(model)
-                            .font(DesignSystem.Typography.caption)
-                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 0) {
-                    Text("\(Int(self.context.contextRemainingPercent.rounded()))%")
-                        .font(.system(size: 22, weight: .semibold, design: .default))
-                        .foregroundStyle(DesignSystem.Colors.primaryText)
-                        .monospacedDigit()
-                    Text("context left")
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(self.tone.color)
-                }
-            }
-
-            MeterBar(tone: self.tone, usedPercent: self.context.contextUsedPercent)
-
-            HStack {
-                Text("\(DisplayText.compact(self.context.contextUsedTokens)) / \(DisplayText.compact(self.context.contextWindowTokens)) used")
-                Spacer()
-                Text(DisplayText.relative(self.context.updatedAt))
-            }
-            .font(DesignSystem.Typography.caption)
-            .foregroundStyle(DesignSystem.Colors.tertiaryText)
-
-            HStack(spacing: 7) {
-                CompactMetric(title: "Last turn", value: DisplayText.compact(self.context.nextMessageTokens ?? 0))
-                CompactMetric(title: "Burn", value: DisplayText.compact(self.context.averageGrowthTokens ?? 0))
-                CompactMetric(title: "Msgs left", value: self.messagesRemainingText)
-            }
-        }
-        .padding(12)
-        .premiumCard(accent: self.tone.color, includeGlow: false)
-    }
-
-    private var directoryName: String {
-        guard let directory = self.context.directory else { return "Codex session" }
-        return URL(fileURLWithPath: directory).lastPathComponent
-    }
-
-    private var messagesRemainingText: String {
-        guard let count = self.context.estimatedMessagesRemaining else { return "--" }
-        if count > 999 { return "999+" }
-        return "\(count)"
-    }
-}
-
-private struct CodexTelemetryCard: View {
-    let session: CodexSessionStats
-
-    var body: some View {
-        VStack(spacing: 9) {
-            HStack(alignment: .center, spacing: 9) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(self.title)
-                        .font(.system(size: 13, weight: .semibold, design: .default))
-                        .foregroundStyle(DesignSystem.Colors.primaryText)
-                        .lineLimit(1)
-                    Text(self.metaLine)
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 8)
-
-                StatusPill(text: self.activityText, tone: self.statusTone)
-            }
-
-            HStack(spacing: 6) {
-                TelemetryMetric(
-                    title: "Cache",
-                    value: DisplayText.compact(self.session.cachedInputTokens),
-                    detail: "\(Int(self.session.cacheSharePercent.rounded()))% input")
-                TelemetryMetric(
-                    title: "Reason",
-                    value: DisplayText.compact(self.session.reasoningOutputTokens),
-                    detail: "\(Int(self.session.reasoningSharePercent.rounded()))% output")
-                TelemetryMetric(
-                    title: "Tools",
-                    value: "\(self.session.toolCalls)",
-                    detail: "\(self.session.shellCommands) shell")
-                TelemetryMetric(
-                    title: "Signals",
-                    value: "\(self.session.patchEvents + self.session.webSearches + self.session.compactions)",
-                    detail: "\(self.session.errors) errors")
-            }
-        }
-        .padding(10)
-        .premiumCard(accent: DesignSystem.Colors.accent(for: .codex), includeGlow: false)
-    }
-
-    private var title: String {
-        self.session.threadTitle?.isEmpty == false ? self.session.threadTitle! : "Codex thread"
-    }
-
-    private var metaLine: String {
-        let parts = [
-            self.session.gitBranch.map { "branch \($0)" },
-            self.session.reasoningEffort.map { "effort \($0)" },
-            self.session.cliVersion.map { "Codex \($0)" },
-        ].compactMap { $0 }
-        return parts.isEmpty ? "local session telemetry" : parts.joined(separator: " / ")
-    }
-
-    private var activityText: String {
-        guard let lastActivityAt = self.session.lastActivityAt else { return "local" }
-        let seconds = max(0, Int(Date().timeIntervalSince(lastActivityAt)))
-        if seconds < 120 { return "live" }
-        if seconds < 3_600 { return "\(seconds / 60)m idle" }
-        return "\(seconds / 3_600)h idle"
-    }
-
-    private var statusTone: UsageTone {
-        guard let lastActivityAt = self.session.lastActivityAt else { return .watch }
-        let seconds = max(0, Int(Date().timeIntervalSince(lastActivityAt)))
-        if self.session.errors > 0 { return .tight }
-        if seconds > 900 { return .watch }
-        return .calm
-    }
-}
-
-private struct CodexFlightRecorderCard: View {
-    let session: CodexSessionStats
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Flight recorder")
-                    .font(.system(size: 13, weight: .semibold, design: .default))
-                    .foregroundStyle(DesignSystem.Colors.primaryText)
-                Spacer()
-                if let biggest = self.session.biggestBurnEvent?.tokenImpact {
-                    Text("peak \(DisplayText.compact(biggest))")
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                        .monospacedDigit()
-                }
-            }
-
-            VStack(spacing: 5) {
-                ForEach(self.session.flightEvents.prefix(4)) { event in
-                    FlightEventRow(event: event)
-                }
-            }
-        }
-        .padding(10)
-        .premiumCard(accent: DesignSystem.Colors.accent(for: .codex), includeGlow: false)
-    }
-}
-
-private struct FlightEventRow: View {
-    let event: CodexFlightEvent
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: self.symbolName)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(self.color)
-                .frame(width: 18, height: 18)
-                .background(self.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(self.event.title)
-                    .font(DesignSystem.Typography.label)
-                    .foregroundStyle(DesignSystem.Colors.secondaryText)
-                    .lineLimit(1)
-                Text(self.event.detail)
-                    .font(.system(size: 9, weight: .regular, design: .default))
-                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            if let tokenImpact = self.event.tokenImpact {
-                Text(DisplayText.compact(tokenImpact))
-                    .font(DesignSystem.Typography.number)
-                    .foregroundStyle(DesignSystem.Colors.primaryText)
-                    .monospacedDigit()
-            }
-        }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
-        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.026))
-    }
-
-    private var symbolName: String {
-        switch self.event.kind {
-        case .tokenSpike: "flame"
-        case .shell: "terminal"
-        case .patch: "hammer"
-        case .web: "globe"
-        case .error: "exclamationmark.triangle"
-        case .compaction: "arrow.down.forward.and.arrow.up.backward"
-        }
-    }
-
-    private var color: Color {
-        switch self.event.kind {
-        case .error: DesignSystem.Colors.danger
-        case .tokenSpike, .compaction: DesignSystem.Colors.warning
-        default: DesignSystem.Colors.accent(for: .codex)
-        }
-    }
-}
-
-private struct StatusPill: View {
-    let text: String
-    let tone: UsageTone
-
-    var body: some View {
-        Text(self.text)
-            .font(.system(size: 9, weight: .semibold, design: .default))
-            .foregroundStyle(self.tone.color)
-            .padding(.horizontal, 7)
-            .frame(height: 20)
-            .background(self.tone.color.opacity(0.12), in: Capsule())
-            .overlay {
-                Capsule()
-                    .stroke(self.tone.color.opacity(0.26))
-            }
-    }
-}
-
-private struct TelemetryMetric: View {
-    let title: String
-    let value: String
-    let detail: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(self.title.uppercased())
-                .font(.system(size: 9, weight: .medium, design: .default))
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-            Text(self.value)
-                .font(.system(size: 12, weight: .semibold, design: .default))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .monospacedDigit()
-            Text(self.detail)
-                .font(.system(size: 9, weight: .regular, design: .default))
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 7)
-        .frame(height: 44)
-        .glassSurface(cornerRadius: 7, tint: .white.opacity(0.032))
-    }
-}
-
-private struct EmptyStateView: View {
-    let isRefreshing: Bool
-    let error: String?
-
-    var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: self.error == nil ? "hourglass" : "exclamationmark.triangle")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(self.error == nil ? DesignSystem.Colors.secondaryText : DesignSystem.Colors.danger)
-            Text(self.error ?? (self.isRefreshing ? "Refreshing" : "No usage data"))
-                .font(DesignSystem.Typography.body)
-                .foregroundStyle(DesignSystem.Colors.secondaryText)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 150)
-        .glassSurface(cornerRadius: 8, tint: .white.opacity(0.055))
+        .padding(.horizontal, DesignSystem.Layout.contentPadding)
+        .padding(.bottom, 10)
     }
 }
 
 @MainActor
-private struct FooterView: View {
+private struct TabButton: View {
+    let tab: AppTab
+    let isActive: Bool
+    let pillNamespace: Namespace.ID
+    let action: () -> Void
+
+    @State private var isPressed: Bool = false
+
+    var body: some View {
+        Button(action: self.action) {
+            HStack(spacing: 4) {
+                Image(systemName: self.tab.symbol)
+                    .font(.system(size: 9, weight: .semibold))
+                    .symbolEffect(.bounce.up.byLayer, value: self.isActive)
+                Text(self.tab.label)
+                    .font(.geist(size: 11, weight: self.isActive ? .semibold : .medium))
+                    .lineLimit(1)
+            }
+            .help("\(self.tab.label) — ⌘\(String(self.tab.keyEquivalent))")
+            .frame(maxWidth: .infinity)
+            .frame(height: 26)
+            .foregroundStyle(self.isActive ? DesignSystem.Colors.primaryText : DesignSystem.Colors.tertiaryText)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            // Tactile press feedback — physical "give" on click
+            .scaleEffect(self.isPressed ? 0.94 : 1.0)
+            .animation(.spring(response: 0.18, dampingFraction: 0.65), value: self.isPressed)
+        }
+        .buttonStyle(.plain)
+        .background {
+            if self.isActive {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.white.opacity(0.16))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.20))
+                    }
+                    .matchedGeometryEffect(id: "tabPill", in: self.pillNamespace)
+            }
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in self.isPressed = true }
+                .onEnded { _ in self.isPressed = false })
+        .keyboardShortcut(KeyEquivalent(self.tab.keyEquivalent), modifiers: .command)
+    }
+}
+
+// MARK: - Tab content router
+
+@MainActor
+private struct TabContent: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        ZStack {
+            if let snapshot = self.model.selectedSnapshot {
+                Group {
+                    switch self.model.activeTab {
+                    case .now:
+                        NowView(
+                            snapshot: snapshot,
+                            overview: self.model.overview,
+                            turnPattern: self.model.turnPatterns[snapshot.kind],
+                            model: self.model)
+                    case .patterns: PatternsView(snapshot: snapshot)
+                    case .wrap: WrapView(snapshot: snapshot)
+                    case .health: HealthView(snapshot: snapshot)
+                    }
+                }
+                .id(self.model.activeTab)
+                .transition(
+                    .asymmetric(
+                        insertion: .opacity.combined(with: .offset(y: 8)).combined(with: .scale(scale: 0.97, anchor: .top)),
+                        removal: .opacity.combined(with: .offset(y: -4))))
+            } else {
+                EmptyOverviewView(isRefreshing: self.model.isRefreshing, error: self.model.lastError)
+            }
+        }
+        // Same spring as the pill morph — pill + content move as one motion
+        .animation(.spring(response: 0.32, dampingFraction: 0.72), value: self.model.activeTab)
+        .animation(.spring(response: 0.32, dampingFraction: 0.72), value: self.model.selectedProvider)
+    }
+}
+
+// MARK: - Footer (statusline)
+
+@MainActor
+private struct StatuslineFooter: View {
     @Bindable var model: MenuBarModel
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(self.leadingText)
-                .font(DesignSystem.Typography.caption)
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
+            StatuslinePulse(model: self.model)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer()
-
-            if self.shouldShowInsights {
-                Button {
-                    self.openInsightsReport()
-                } label: {
-                    HStack(spacing: 3) {
-                        Text("Insights")
-                        Image(systemName: "arrow.up.right.square")
-                            .font(.system(size: 9, weight: .semibold))
+            Menu {
+                // Menu bar module picker — same options also appear via
+                // right-click on the status item itself. Both surfaces
+                // exist because some users never right-click status items.
+                Menu("Menu bar shows") {
+                    ForEach(MenuBarModule.allCases) { module in
+                        Button {
+                            self.model.setMenuBarModule(module)
+                        } label: {
+                            if self.model.selectedMenuBarModule == module {
+                                Label("\(module.displayName)  ·  \(module.label)", systemImage: "checkmark")
+                            } else {
+                                Text("\(module.displayName)  ·  \(module.label)")
+                            }
+                        }
                     }
                 }
-                .font(DesignSystem.Typography.caption)
-                .buttonStyle(.plain)
-                .foregroundStyle(DesignSystem.Colors.secondaryText)
-                .help("Open the cross-session Claude Code Insights HTML report")
-            }
 
-            Button(self.model.alertMode.title) {
-                self.model.cycleAlertMode()
-            }
-            .font(DesignSystem.Typography.caption)
-            .buttonStyle(.plain)
-            .foregroundStyle(DesignSystem.Colors.secondaryText)
+                Divider()
 
-            Button {
-                self.model.toggleLaunchAtLogin()
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: self.model.isLaunchAtLoginEnabled ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(self.model.isLaunchAtLoginEnabled ? DesignSystem.Colors.success : DesignSystem.Colors.tertiaryText)
-                    Text("Login")
+                Button(self.model.alertMode.title) {
+                    self.model.cycleAlertMode()
                 }
-            }
-            .font(DesignSystem.Typography.caption)
-            .buttonStyle(.plain)
-            .foregroundStyle(DesignSystem.Colors.secondaryText)
-            .help(self.model.isLaunchAtLoginEnabled ? "Disable launching burnrate at login" : "Launch burnrate when you log in")
 
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
+                Button {
+                    self.model.toggleLaunchAtLogin()
+                } label: {
+                    if self.model.isLaunchAtLoginEnabled {
+                        Label("Launch at login", systemImage: "checkmark")
+                    } else {
+                        Text("Launch at login")
+                    }
+                }
+
+                Divider()
+
+                Button("Quit burnrate") {
+                    NSApplication.shared.terminate(nil)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
             }
-            .font(DesignSystem.Typography.caption)
-            .buttonStyle(.plain)
-            .foregroundStyle(DesignSystem.Colors.secondaryText)
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 22, height: 22)
         }
         .padding(.horizontal, DesignSystem.Layout.contentPadding)
-        .padding(.vertical, 8)
-    }
-
-    private var leadingText: String {
-        if self.model.selectedProvider == .claude,
-           let snap = self.model.overview.snapshot(for: .claude),
-           let day = snap.claudeAggregate?.daysSinceFirstSession
-        {
-            return "day \(day) · " + self.updatedText
-        }
-        return self.updatedText
-    }
-
-    private var updatedText: String {
-        guard !self.model.overview.snapshots.isEmpty else { return "not refreshed" }
-        let seconds = max(0, Int(Date().timeIntervalSince(self.model.overview.updatedAt)))
-        if seconds < 60 { return "updated just now" }
-        return "updated \(seconds / 60)m ago"
-    }
-
-    private var shouldShowInsights: Bool {
-        guard self.model.selectedProvider == .claude else { return false }
-        let path = ("~/.claude/usage-data/report.html" as NSString).expandingTildeInPath
-        return FileManager.default.fileExists(atPath: path)
-    }
-
-    private func openInsightsReport() {
-        let path = ("~/.claude/usage-data/report.html" as NSString).expandingTildeInPath
-        guard FileManager.default.fileExists(atPath: path) else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        .padding(.vertical, 9)
     }
 }
 
-private struct GlassBackdrop: View {
+@MainActor
+private struct StatuslinePulse: View {
+    @Bindable var model: MenuBarModel
+
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
+        HStack(spacing: 6) {
+            if let fire = self.model.fireEvent {
+                Image(systemName: "flame.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(DesignSystem.Colors.brandHot)
+                    .symbolEffect(.bounce, value: fire.triggeredAt)
+                Text(self.fireCopy(fire))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.brandHot)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .contentTransition(.opacity)
+            } else if let error = self.model.lastError {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(DesignSystem.Colors.danger)
+                Text("paused · \(error.title)")
+                    .font(.geistMono(size: 10))
+                    .foregroundStyle(DesignSystem.Colors.danger)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(error.recovery ?? error.raw)
+            } else if let live = self.liveSummary {
+                Image(systemName: live.glyph)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.brandLavender)
+                Text(live.text)
+                    .font(.geistMono(size: 10))
+                    .foregroundStyle(DesignSystem.Colors.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.25), value: live.text)
+            } else {
+                Text("no live session · refreshed \(self.refreshedText)")
+                    .font(.geistMono(size: 10))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    .lineLimit(1)
+            }
+        }
+    }
 
-            LinearGradient(
-                colors: [
-                    Color.white.opacity(0.16),
-                    Color.white.opacity(0.045),
-                    Color.black.opacity(0.16),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing)
+    private struct LiveSummary {
+        let glyph: String
+        let text: String
+    }
 
-            RadialGradient(
-                colors: [
-                    DesignSystem.Colors.accent(for: .codex).opacity(0.18),
-                    .clear,
-                ],
-                center: .topLeading,
-                startRadius: 18,
-                endRadius: 260)
+    private var liveSummary: LiveSummary? {
+        if let session = self.model.selectedSnapshot?.claudeSession,
+           !session.activeTaskChain.isEmpty || session.activeTaskTitle != nil
+        {
+            return LiveSummary(glyph: self.glyph(for: session.activeTaskChain.last), text: self.claudeText(session: session))
+        }
+        if let codex = self.model.selectedSnapshot?.codexSession,
+           let last = codex.lastActivityAt,
+           Date().timeIntervalSince(last) < 1_800
+        {
+            return LiveSummary(glyph: "terminal", text: self.codexText(session: codex))
+        }
+        return nil
+    }
 
-            RadialGradient(
-                colors: [
-                    DesignSystem.Colors.accent(for: .claude).opacity(0.14),
-                    .clear,
-                ],
-                center: .bottomTrailing,
-                startRadius: 12,
-                endRadius: 260)
+    private func claudeText(session: ClaudeSessionStats) -> String {
+        let chain = session.activeTaskChain.suffix(3).joined(separator: " → ")
+        let project = session.projectName ?? "session"
+        let lastSeen: String = {
+            guard let last = session.lastActivityAt else { return "" }
+            let s = max(0, Int(Date().timeIntervalSince(last)))
+            if s < 5 { return "live" }
+            if s < 60 { return "\(s)s ago" }
+            return "\(s / 60)m ago"
+        }()
+        let parts = [
+            chain.isEmpty ? "turn \(session.assistantMessageCount)" : chain,
+            project,
+            lastSeen,
+        ].filter { !$0.isEmpty }
+        return parts.joined(separator: " · ")
+    }
+
+    private func codexText(session: CodexSessionStats) -> String {
+        let title = session.threadTitle?.isEmpty == false ? session.threadTitle! : "codex"
+        let lastSeen: String = {
+            guard let last = session.lastActivityAt else { return "" }
+            let s = max(0, Int(Date().timeIntervalSince(last)))
+            if s < 5 { return "live" }
+            if s < 60 { return "\(s)s ago" }
+            return "\(s / 60)m ago"
+        }()
+        return "\(title) · turn \(session.toolCalls) · \(lastSeen)"
+    }
+
+    private func glyph(for tool: String?) -> String {
+        switch tool {
+        case "Edit", "Write", "NotebookEdit": "pencil.line"
+        case "Read": "doc.text"
+        case "Bash": "terminal"
+        case "Grep", "Glob": "magnifyingglass"
+        case "WebSearch", "WebFetch": "globe"
+        case "Skill": "sparkles"
+        case "Task", "Agent": "person.2"
+        default: "wand.and.stars"
+        }
+    }
+
+    private var refreshedText: String {
+        guard let last = self.model.lastRefreshAt else { return "never" }
+        return DisplayText.relative(last)
+    }
+
+    /// Celebratory copy when the user just shoved a giant turn through near-full
+    /// context and lived to tell the tale. Picks a variant deterministically
+    /// from the trigger time so it doesn't flicker between refreshes.
+    private func fireCopy(_ fire: MenuBarModel.FireEvent) -> String {
+        let tokensK = Int((Double(fire.turnTokens) / 1_000).rounded())
+        let pct = Int(fire.contextUsedPercent.rounded())
+        let variants: [String] = [
+            "playing with fire — \(tokensK)K turn at \(pct)%",
+            "woah ok cooking — \(tokensK)K turn, still alive",
+            "no fear — \(tokensK)K through at \(pct)% used",
+            "burning hot — squeezed \(tokensK)K through",
+            "pushing it — \(tokensK)K turn, \(pct)% used",
+        ]
+        let idx = Int(fire.triggeredAt.timeIntervalSince1970) % variants.count
+        return variants[idx]
+    }
+}
+
+// MARK: - Empty / loading / error overview
+
+private struct EmptyOverviewView: View {
+    let isRefreshing: Bool
+    let error: MenuBarModel.UsageError?
+
+    var body: some View {
+        Group {
+            if let error {
+                ErrorOverview(error: error)
+            } else if self.isRefreshing {
+                LoadingOverview()
+            } else {
+                FirstRunOverview()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 28)
+    }
+}
+
+private struct LoadingOverview: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.brandLavender)
+                .symbolEffect(.pulse, options: .repeating)
+            Text("Warming up the watcher\u{2026}")
+                .font(.geist(size: 12))
+                .foregroundStyle(DesignSystem.Colors.secondaryText)
         }
     }
 }
 
+private struct ErrorOverview: View {
+    let error: MenuBarModel.UsageError
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.danger)
+            Text(self.error.title)
+                .font(.geist(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+                .multilineTextAlignment(.center)
+            if let recovery = self.error.recovery {
+                Text(recovery)
+                    .font(.geist(size: 11))
+                    .foregroundStyle(DesignSystem.Colors.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+/// First-launch / no-data state. Explains what burnrate is, lists which
+/// providers are detected, and points new users at the next action.
+private struct FirstRunOverview: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.brandLavender)
+                    Text("Welcome to burnrate")
+                        .font(.geist(size: 14, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                }
+                Text("A live watcher for your Claude Code and Codex usage \u{2014} context windows, 5h burst limits, weekly caps, and per-turn pace.")
+                    .font(.geist(size: 11))
+                    .foregroundStyle(DesignSystem.Colors.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("To get started")
+                    .font(.geist(size: 10, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    .tracking(0.6)
+                    .textCase(.uppercase)
+                FirstRunStepRow(
+                    symbol: "1.circle.fill",
+                    title: "Install Claude Code or Codex",
+                    detail: "burnrate reads transcripts from \u{223C}/.claude or \u{223C}/.codex.")
+                FirstRunStepRow(
+                    symbol: "2.circle.fill",
+                    title: "Authorize Keychain access",
+                    detail: "Grants read-only access to OAuth tokens for live 5h\u{202F}/\u{202F}7d window data.")
+                FirstRunStepRow(
+                    symbol: "3.circle.fill",
+                    title: "Start coding",
+                    detail: "Numbers populate within a turn or two.")
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 9))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                Text("Already configured? Use \u{2318}R to refresh.")
+                    .font(.geist(size: 10))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct FirstRunStepRow: View {
+    let symbol: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: self.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.brandLavender)
+                .frame(width: 14, alignment: .center)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(self.title)
+                    .font(.geist(size: 11, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                Text(self.detail)
+                    .font(.geist(size: 10))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+// MARK: - Background
+
+private struct AppBackdrop: View {
+    var body: some View {
+        // Fully transparent — let Liquid Glass on cards be the only visible chrome.
+        Color.clear
+    }
+}

@@ -3,7 +3,7 @@ import Foundation
 public actor ClaudeUsageWatcher {
     public init() {}
 
-    public func loadSnapshot(now: Date) async -> ProviderUsageSnapshot? {
+    public func loadSnapshot(now: Date, recentDailySpend: Double? = nil) async -> ProviderUsageSnapshot? {
         let root = Self.claudeRoot()
         guard FileManager.default.fileExists(atPath: root.path) else { return nil }
 
@@ -36,6 +36,7 @@ public actor ClaudeUsageWatcher {
             facets: facets,
             liveSession: liveSession,
             oauth: oauth,
+            recentDailySpend: recentDailySpend,
             now: now)
         patternCards = Self.rankCards(patternCards)
         let modelMix = aggregate?.modelMix ?? self.modelMixFromLive(liveSession)
@@ -49,6 +50,11 @@ public actor ClaudeUsageWatcher {
         let projectLabel = liveSession?.projectName
             ?? sessionMetas.first?.projectName
             ?? "Claude Code"
+
+        let claudeMemory = self.computeClaudeProjectMemory(
+            sessionMetas: sessionMetas,
+            liveSession: liveSession,
+            currentProject: projectLabel)
 
         return ProviderUsageSnapshot(
             kind: .claude,
@@ -65,6 +71,7 @@ public actor ClaudeUsageWatcher {
             claudeAggregate: aggregate,
             claudeFacets: facets,
             claudeTodayBreakdown: todayBreakdown,
+            claudeMemory: claudeMemory,
             patternCards: patternCards,
             healthIndicators: healthIndicators,
             creditBalance: oauth?.extraUsage.map { $0.monthlyLimit - $0.usedCredits },
@@ -73,6 +80,43 @@ public actor ClaudeUsageWatcher {
             },
             streakDays: aggregate?.streakDays ?? 0,
             updatedAt: now)
+    }
+
+    private func computeClaudeProjectMemory(
+        sessionMetas: [ParsedSessionMeta],
+        liveSession: ClaudeSessionStats?,
+        currentProject: String) -> CodexProjectMemory?
+    {
+        guard !sessionMetas.isEmpty else { return nil }
+
+        let projectMetas = sessionMetas.filter { $0.projectName == currentProject }
+        guard !projectMetas.isEmpty else { return nil }
+
+        func sessionTokens(_ m: ParsedSessionMeta) -> Int { m.inputTokens + m.outputTokens }
+        func turnTokens(_ m: ParsedSessionMeta) -> Int {
+            sessionTokens(m) / max(1, m.assistantMessageCount)
+        }
+
+        let totalSessionTokens = projectMetas.map(sessionTokens).reduce(0, +)
+        let avgSessionTokens = totalSessionTokens / max(1, projectMetas.count)
+        let avgTurnTokens = projectMetas.map(turnTokens).reduce(0, +) / max(1, projectMetas.count)
+
+        let globalTotal = sessionMetas.map(sessionTokens).reduce(0, +)
+        let globalAvg = max(1, globalTotal / max(1, sessionMetas.count))
+        let burnMultiple = Double(avgSessionTokens) / Double(globalAvg)
+
+        let heaviest = projectMetas.max { sessionTokens($0) < sessionTokens($1) }
+        let lastUpdatedAt = projectMetas.compactMap(\.startTime).max()
+
+        return CodexProjectMemory(
+            projectName: currentProject,
+            sessionCount: projectMetas.count,
+            averageSessionTokens: avgSessionTokens,
+            averageTurnTokens: avgTurnTokens,
+            heaviestSessionTokens: heaviest.map(sessionTokens) ?? 0,
+            heaviestSessionTitle: nil,
+            relativeBurnMultiple: burnMultiple,
+            lastUpdatedAt: lastUpdatedAt)
     }
 
     private func readOAuthUsage(root: URL) async -> ClaudeOAuthUsage? {
@@ -158,6 +202,45 @@ public actor ClaudeUsageWatcher {
             return ClaudeDailyTokenCount(date: date, totalTokens: total)
         }.sorted { $0.date < $1.date }.suffix(30)
 
+        // Per-model lifetime cost-per-token (embeds the actual input/output/cache
+        // distribution observed for that specific model). This avoids the
+        // global-blended rate over-estimating recent activity when lifetime mix
+        // skews toward expensive models.
+        var perModelRate: [String: Double] = [:]
+        for entry in modelTokens {
+            let total = entry.inputTokens + entry.outputTokens + entry.cacheReadTokens + entry.cacheCreationTokens
+            guard total > 0 else { continue }
+            perModelRate[entry.modelName] = entry.syntheticCostUSD / Double(total)
+        }
+
+        // Walk last-30-days per-model token data with each model's actual rate.
+        let last30Entries = (raw.dailyModelTokens ?? [])
+            .compactMap { entry -> (Date, [String: Int])? in
+                guard let date = ClaudeDate.parseDay(entry.date),
+                      let by = entry.tokensByModel
+                else { return nil }
+                return (date, by)
+            }
+            .sorted { $0.0 < $1.0 }
+            .suffix(30)
+
+        var thirtyDayCost = 0.0
+        var thirtyDayTokens = 0
+        for (_, by) in last30Entries {
+            for (model, tokens) in by {
+                thirtyDayTokens += tokens
+                if let rate = perModelRate[model] {
+                    thirtyDayCost += Double(tokens) * rate
+                } else {
+                    // Fallback: compute synthesized rate fresh for an unseen model.
+                    // Assume 70% input / 25% output / 5% cache split as a heuristic.
+                    let r = ClaudePricing.rates(for: model)
+                    let blended = (r.input * 0.70 + r.output * 0.25 + r.cacheRead * 0.05) / 1_000_000.0
+                    thirtyDayCost += Double(tokens) * blended
+                }
+            }
+        }
+
         return ClaudeAggregateStats(
             firstSessionDate: firstSession,
             totalSessions: raw.totalSessions ?? 0,
@@ -174,6 +257,8 @@ public actor ClaudeUsageWatcher {
             lifetimeWebSearchRequests: lifetimeWebSearches,
             lifetimeModelTokens: modelTokens.sorted { $0.syntheticCostUSD > $1.syntheticCostUSD },
             lifetimeSyntheticCostUSD: lifetimeCostUSD,
+            lastThirtyDayCostUSD: thirtyDayCost,
+            lastThirtyDayTokens: thirtyDayTokens,
             modelMix: Array(modelMix),
             recentDayTokens: Array(recentTokens),
             speculationTimeSavedMs: raw.totalSpeculationTimeSavedMs ?? 0,
@@ -215,6 +300,8 @@ public actor ClaudeUsageWatcher {
             lifetimeWebSearchRequests: base.lifetimeWebSearchRequests,
             lifetimeModelTokens: base.lifetimeModelTokens,
             lifetimeSyntheticCostUSD: base.lifetimeSyntheticCostUSD,
+            lastThirtyDayCostUSD: base.lastThirtyDayCostUSD,
+            lastThirtyDayTokens: base.lastThirtyDayTokens,
             modelMix: base.modelMix,
             recentDayTokens: base.recentDayTokens,
             speculationTimeSavedMs: base.speculationTimeSavedMs,
@@ -557,7 +644,25 @@ public actor ClaudeUsageWatcher {
             + session.lastCacheReadTokens
             + session.lastCacheCreateTokens
         let contextWindow = Self.inferContextWindow(model: session.modelName, observedUsedTokens: usedTokens)
-        let averageGrowth = max(2_000, session.lastInputTokens > 0 ? session.lastInputTokens : 4_000)
+
+        // Per-turn context growth — best signal is what the LAST turn just
+        // added to context (assistant output + user input). Historical average
+        // understates because early turns are small while recent turns are large
+        // (each new turn carries the previous output forward).
+        let averageGrowth: Int = {
+            // Recent reality: last assistant output + ~1K user input estimate
+            let lastNewTokens = session.lastOutputTokens + 1_000
+            if lastNewTokens >= 3_000 {
+                return lastNewTokens
+            }
+            // Fallback to historical average × 1.5 if last turn was tiny
+            if session.userMessageCount > 0, usedTokens > 0 {
+                let perTurn = usedTokens / session.userMessageCount
+                return max(3_000, Int(Double(perTurn) * 1.5))
+            }
+            return 4_000
+        }()
+
         return WorkContextSnapshot(
             sessionId: session.sessionId,
             directory: session.projectPath,
@@ -572,13 +677,25 @@ public actor ClaudeUsageWatcher {
 
     private static func contextWindowTokens(for model: String?) -> Int {
         guard let model else { return 200_000 }
-        if model.contains("[1m]") { return 1_000_000 }
+        let lowered = model.lowercased()
+        // Explicit `[1m]` suffix wins.
+        if lowered.contains("[1m]") { return 1_000_000 }
+        // Models that ship with a 1M context window by default. The JSONL
+        // transcript strips runtime suffixes so we can't rely on `[1m]` —
+        // the model ID itself is authoritative.
+        if lowered.contains("opus-4-7") { return 1_000_000 }
+        if lowered.contains("sonnet-4-6") { return 1_000_000 }
         return 200_000
     }
 
-    /// Detect 1m beta from observed usage when the model string strips `[1m]`.
+    /// Resolve the context window from the model name. We no longer infer
+    /// from observed usage — the model→window mapping is authoritative,
+    /// since stats downstream (percentages, p90 buckets, forecasts) all
+    /// scale by the denominator and silent fallbacks distort everything.
     private static func inferContextWindow(model: String?, observedUsedTokens: Int) -> Int {
         let base = contextWindowTokens(for: model)
+        // Safety net: if we somehow undersized the window and observed usage
+        // already exceeds it, jump straight to 1M rather than clipping.
         if observedUsedTokens > base { return 1_000_000 }
         return base
     }
@@ -669,9 +786,16 @@ public actor ClaudeUsageWatcher {
             driver = ("Just started", "\(Self.compact(lastTurnTokens)) tokens last turn")
         }
 
+        // Per-turn context growth: new (non-cached) input + output. Cache
+        // reads don't grow the window — they replay it — so subtracting
+        // `lastCacheRead` gives the actual new tokens added this turn.
+        // Floor at 2K to avoid divide-by-near-zero on tiny one-word replies.
+        let perTurnGrowth = max(2_000, max(0, lastInput - lastCacheRead) + lastOutput)
+        let contextRemaining = max(0, contextWindow - observedUsed)
         let forecast: String
         if lastTurnShare >= 70 {
-            forecast = "~\(max(1, Int(((100 - lastTurnShare) / max(1, lastTurnShare / 4)).rounded()))) turns at this size"
+            let turnsLeft = max(1, contextRemaining / perTurnGrowth)
+            forecast = "~\(turnsLeft) turn\(turnsLeft == 1 ? "" : "s") at this size"
         } else {
             forecast = "Plenty of context left"
         }
@@ -721,15 +845,24 @@ public actor ClaudeUsageWatcher {
         var minutes = todays.reduce(0) { $0 + $1.durationMinutes }
 
         if let live = liveSession,
-           let start = live.sessionStartedAt,
-           calendar.isDate(start, inSameDayAs: now)
+           let start = live.sessionStartedAt
         {
-            requests = max(requests, live.userMessageCount)
-            input = max(input, live.totalInputTokens)
-            output = max(output, live.totalOutputTokens)
-            if let last = live.lastActivityAt {
-                let liveMinutes = max(0, Int(last.timeIntervalSince(start) / 60))
-                minutes = max(minutes, liveMinutes)
+            // Count the live session if it started today OR if its last
+            // activity is today (session crossed midnight and is still going).
+            let startsToday = calendar.isDate(start, inSameDayAs: now)
+            let activeToday = live.lastActivityAt.map { calendar.isDate($0, inSameDayAs: now) } ?? false
+
+            if startsToday || activeToday {
+                requests = max(requests, live.userMessageCount)
+                input = max(input, live.totalInputTokens)
+                output = max(output, live.totalOutputTokens)
+                if let last = live.lastActivityAt {
+                    // For midnight-crossing sessions, only count today's portion.
+                    let dayStart = calendar.startOfDay(for: now)
+                    let effectiveStart = max(start, dayStart)
+                    let liveMinutes = max(0, Int(last.timeIntervalSince(effectiveStart) / 60))
+                    minutes = max(minutes, liveMinutes)
+                }
             }
         }
 
@@ -805,8 +938,12 @@ public actor ClaudeUsageWatcher {
             return windows
         }
 
+        // No OAuth signal — fall back to context only. The synthetic
+        // "Today's pace" / "Week's pace" gauges were misleading: they
+        // measured today vs. (28-day-avg × 1.5), which pegged at 100%
+        // trivially and didn't represent any real Anthropic limit. The
+        // UI surfaces a "auth not detected" hint instead.
         var windows: [UsageWindow] = []
-
         if let context = workContext, context.contextWindowTokens > 0 {
             windows.append(
                 UsageWindow(
@@ -815,40 +952,6 @@ public actor ClaudeUsageWatcher {
                     usedPercent: context.contextUsedPercent,
                     resetsAt: nil))
         }
-
-        if let agg = aggregate {
-            let recent = agg.dailyMessageCounts.suffix(28).map { $0.messageCount }.filter { $0 > 0 }
-            let baseline = recent.isEmpty ? 0 : recent.reduce(0, +) / max(1, recent.count)
-            let target = max(1, Int(Double(baseline) * 1.5))
-            let used = today.requests
-            let percent = min(100, Double(used) / Double(target) * 100)
-            let calendar = Calendar.current
-            let midnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))
-            windows.append(
-                UsageWindow(
-                    id: "claude-day",
-                    title: "Today's pace",
-                    usedPercent: percent,
-                    resetsAt: midnight))
-
-            let sevenDay = agg.dailyMessageCounts.suffix(7).map { $0.messageCount }.reduce(0, +)
-            let trailing = agg.dailyMessageCounts.dropLast(7).suffix(21).map { $0.messageCount }
-            let trailingAvg = trailing.isEmpty ? 0 : trailing.reduce(0, +) / max(1, trailing.count)
-            let weekTarget = max(1, Int(Double(trailingAvg) * 7 * 1.5))
-            let weekPercent = min(100, Double(sevenDay) / Double(weekTarget) * 100)
-            let calendar2 = Calendar.current
-            var weekComponents = calendar2.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
-            weekComponents.weekday = calendar2.firstWeekday
-            let weekStart = calendar2.date(from: weekComponents) ?? now
-            let weekEnd = calendar2.date(byAdding: .day, value: 7, to: weekStart)
-            windows.append(
-                UsageWindow(
-                    id: "claude-week",
-                    title: "Week's pace",
-                    usedPercent: weekPercent,
-                    resetsAt: weekEnd))
-        }
-
         return windows
     }
 
@@ -860,6 +963,7 @@ public actor ClaudeUsageWatcher {
         facets: ClaudeFacets?,
         liveSession: ClaudeSessionStats?,
         oauth: ClaudeOAuthUsage?,
+        recentDailySpend: Double?,
         now: Date) -> [ClaudePatternCard]
     {
         var cards: [ClaudePatternCard] = []
@@ -954,7 +1058,7 @@ public actor ClaudeUsageWatcher {
         }
 
         // Overage trajectory — projects when the monthly cap will be hit at current pace
-        if let card = self.overageForecastCard(oauth: oauth, now: now) {
+        if let card = self.overageForecastCard(oauth: oauth, recentDailySpend: recentDailySpend, now: now) {
             cards.append(card)
         }
 
@@ -1487,7 +1591,7 @@ public actor ClaudeUsageWatcher {
             sortPriority: 50)
     }
 
-    private func overageForecastCard(oauth: ClaudeOAuthUsage?, now: Date) -> ClaudePatternCard? {
+    private func overageForecastCard(oauth: ClaudeOAuthUsage?, recentDailySpend: Double?, now: Date) -> ClaudePatternCard? {
         guard let extra = oauth?.extraUsage,
               extra.isEnabled,
               extra.monthlyLimit > 0,
@@ -1500,17 +1604,33 @@ public actor ClaudeUsageWatcher {
         let totalDays = calendar.range(of: .day, in: .month, for: now)?.count ?? 30
         let daysRemaining = max(1, totalDays - dayOfMonth)
 
-        let dailyBurn = extra.usedCredits / Double(max(1, dayOfMonth))
+        // Prefer the recent-rate signal when available — it's a real
+        // 7-day rolling slope, decoupled from a heavy first-of-month
+        // that month-to-date averaging would let dominate for weeks.
+        // Fall back to MTD avg only when we don't have enough samples.
+        let dailyBurn: Double
+        let usingRecentRate: Bool
+        if let recent = recentDailySpend, recent >= 0 {
+            dailyBurn = recent
+            usingRecentRate = true
+        } else {
+            dailyBurn = extra.usedCredits / Double(max(1, dayOfMonth))
+            usingRecentRate = false
+        }
+
         let projectedTotal = extra.usedCredits + dailyBurn * Double(daysRemaining)
         let projectedPct = min(200, projectedTotal / extra.monthlyLimit * 100)
         let willHit = projectedTotal >= extra.monthlyLimit
+        let projectionFootnote = usingRecentRate
+            ? "based on last 7 days"
+            : "based on month-to-date average · less reliable"
 
         let body: String
         let toneVal: ClaudePatternTone
         let footnote: String
         let highlight: String
 
-        if willHit {
+        if willHit, dailyBurn > 0 {
             // Days until cap is hit at current burn
             let remainingBudget = extra.monthlyLimit - extra.usedCredits
             let daysToCap = max(0, Int((remainingBudget / dailyBurn).rounded()))
@@ -1519,12 +1639,12 @@ public actor ClaudeUsageWatcher {
             formatter.dateFormat = "MMM d"
             body = "At $\(Self.formatMoney(dailyBurn))/day you'll hit your $\(Self.formatMoney(extra.monthlyLimit)) overage cap by \(formatter.string(from: capDate)) — \(daysToCap) day\(daysToCap == 1 ? "" : "s") away. Projected total: $\(Self.formatMoney(projectedTotal))."
             toneVal = daysToCap <= 3 ? .caution : .neutral
-            footnote = "linear projection"
+            footnote = projectionFootnote
             highlight = formatter.string(from: capDate)
         } else {
             body = "At $\(Self.formatMoney(dailyBurn))/day you're on track for $\(Self.formatMoney(projectedTotal)) by month end — \(Int(projectedPct.rounded()))% of your $\(Self.formatMoney(extra.monthlyLimit)) overage cap."
             toneVal = .positive
-            footnote = "month-end projection"
+            footnote = projectionFootnote
             highlight = "$\(Self.formatMoney(projectedTotal))"
         }
 
@@ -2560,11 +2680,18 @@ public actor ClaudeUsageWatcher {
            let last = live.lastActivityAt,
            calendar.isDate(start, inSameDayAs: now) || calendar.isDate(last, inSameDayAs: now)
         {
-            let startHour = calendar.component(.hour, from: start)
-            let endHour = calendar.component(.hour, from: last)
-            let span = max(1, endHour - startHour + 1)
+            // Clamp to today's portion only — sessions that crossed midnight
+            // (e.g. start=yesterday 22:00, end=today 02:00) would otherwise
+            // produce an invalid Int range.
+            let startHour = calendar.isDate(start, inSameDayAs: now)
+                ? calendar.component(.hour, from: start) : 0
+            let endHour = calendar.isDate(last, inSameDayAs: now)
+                ? calendar.component(.hour, from: last) : 23
+            let safeStart = min(startHour, endHour)
+            let safeEnd = max(startHour, endHour)
+            let span = max(1, safeEnd - safeStart + 1)
             let perHour = max(1, live.assistantMessageCount / span)
-            for h in startHour...endHour where (0..<24).contains(h) {
+            for h in safeStart...safeEnd where (0..<24).contains(h) {
                 hours[h] += perHour
             }
         }

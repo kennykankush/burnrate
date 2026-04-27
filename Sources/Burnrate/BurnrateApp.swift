@@ -16,9 +16,11 @@ struct BurnrateAppScene: App {
     @NSApplicationDelegateAdaptor(BurnrateAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // We're a status-bar app — the visible UI is the NSPopover hosted by
-        // BurnrateAppDelegate. A `Settings` scene gives SwiftUI's `App`
-        // protocol something to chew on without putting a window on screen.
+        // The status item is owned by the AppDelegate via
+        // `StatusBarController` so we get a custom 2-line label, right-
+        // click context menu, and no MenuBarExtra height cap. The
+        // Settings scene stays so SwiftUI gives the app a proper main
+        // menu (otherwise quit/about behave oddly).
         Settings { EmptyView() }
     }
 }
@@ -26,25 +28,14 @@ struct BurnrateAppScene: App {
 @MainActor
 final class BurnrateAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let model = MenuBarModel()
-    private var statusBar: StatusBarController?
-    private var labelRefreshTask: Task<Void, Never>?
+    private var statusController: StatusBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. This is a status-bar app.
         NSApp.setActivationPolicy(.accessory)
 
-        self.statusBar = StatusBarController(model: self.model)
-        self.model.start()
-
-        // Refresh the menubar label periodically so the percent stays current.
-        // A Task with `Task.sleep` is the modern, concurrency-safe replacement
-        // for `Timer.scheduledTimer` here.
-        self.labelRefreshTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
-                self?.statusBar?.refreshLabel()
-            }
-        }
+        FontRegistration.registerBundledFonts()
+        self.statusController = StatusBarController(model: self.model)
     }
 }
 

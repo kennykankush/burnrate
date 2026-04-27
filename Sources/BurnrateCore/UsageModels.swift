@@ -38,6 +38,15 @@ public struct UsageWindow: Codable, Equatable, Identifiable, Sendable {
         max(0, 100 - self.usedPercent)
     }
 
+    /// Approximate total length of this rate-limit window. Used for pace
+    /// projection — without it we can't compute burn rate.
+    public var totalDuration: TimeInterval? {
+        let t = self.title.lowercased()
+        if t.contains("5h") || t == "session" { return 5 * 3600 }
+        if t.contains("7d") || t.contains("weekly") || t.contains("week") { return 7 * 86400 }
+        return nil
+    }
+
     public init(id: String, title: String, usedPercent: Double, resetsAt: Date?) {
         self.id = id
         self.title = title
@@ -63,6 +72,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
     public let claudeAggregate: ClaudeAggregateStats?
     public let claudeFacets: ClaudeFacets?
     public let claudeTodayBreakdown: ClaudeTodayBreakdown?
+    public let claudeMemory: CodexProjectMemory?
     public let patternCards: [ClaudePatternCard]
     public let healthIndicators: [ClaudeHealthIndicator]
     public let creditBalance: Double?
@@ -85,6 +95,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         claudeAggregate: ClaudeAggregateStats? = nil,
         claudeFacets: ClaudeFacets? = nil,
         claudeTodayBreakdown: ClaudeTodayBreakdown? = nil,
+        claudeMemory: CodexProjectMemory? = nil,
         patternCards: [ClaudePatternCard] = [],
         healthIndicators: [ClaudeHealthIndicator] = [],
         creditBalance: Double?,
@@ -106,6 +117,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         self.claudeAggregate = claudeAggregate
         self.claudeFacets = claudeFacets
         self.claudeTodayBreakdown = claudeTodayBreakdown
+        self.claudeMemory = claudeMemory
         self.patternCards = patternCards
         self.healthIndicators = healthIndicators
         self.creditBalance = creditBalance
@@ -462,6 +474,28 @@ public struct WorkContextSnapshot: Codable, Equatable, Sendable {
         return max(0, self.contextRemainingTokens / averageGrowthTokens)
     }
 
+    /// Bucketed estimates: how many messages of each size class fit in the
+    /// remaining context. More useful than a single number because the next
+    /// turn's cost depends entirely on whether the user is asking for a tiny
+    /// detail or a multi-file refactor.
+    public struct RoomFor: Equatable, Sendable {
+        public let small: Int   // ~3K tokens — quick edit, short reply
+        public let medium: Int  // ~12K — single file edit, normal reply
+        public let large: Int   // ~40K — multi-file refactor, big output
+
+        public static let smallSize = 3_000
+        public static let mediumSize = 12_000
+        public static let largeSize = 40_000
+    }
+
+    public var roomFor: RoomFor {
+        let remaining = self.contextRemainingTokens
+        return RoomFor(
+            small: max(0, remaining / RoomFor.smallSize),
+            medium: max(0, remaining / RoomFor.mediumSize),
+            large: max(0, remaining / RoomFor.largeSize))
+    }
+
     public init(
         sessionId: String?,
         directory: String?,
@@ -685,6 +719,8 @@ public struct ClaudeAggregateStats: Codable, Equatable, Sendable {
     public let lifetimeWebSearchRequests: Int
     public let lifetimeModelTokens: [ClaudeModelTokens]
     public let lifetimeSyntheticCostUSD: Double
+    public let lastThirtyDayCostUSD: Double
+    public let lastThirtyDayTokens: Int
     public let modelMix: [ModelUsageShare]
     public let recentDayTokens: [ClaudeDailyTokenCount]
     public let speculationTimeSavedMs: Int
@@ -754,6 +790,8 @@ public struct ClaudeAggregateStats: Codable, Equatable, Sendable {
         lifetimeWebSearchRequests: Int,
         lifetimeModelTokens: [ClaudeModelTokens],
         lifetimeSyntheticCostUSD: Double,
+        lastThirtyDayCostUSD: Double = 0,
+        lastThirtyDayTokens: Int = 0,
         modelMix: [ModelUsageShare],
         recentDayTokens: [ClaudeDailyTokenCount],
         speculationTimeSavedMs: Int,
@@ -776,6 +814,8 @@ public struct ClaudeAggregateStats: Codable, Equatable, Sendable {
         self.lifetimeWebSearchRequests = lifetimeWebSearchRequests
         self.lifetimeModelTokens = lifetimeModelTokens
         self.lifetimeSyntheticCostUSD = lifetimeSyntheticCostUSD
+        self.lastThirtyDayCostUSD = lastThirtyDayCostUSD
+        self.lastThirtyDayTokens = lastThirtyDayTokens
         self.modelMix = modelMix
         self.recentDayTokens = recentDayTokens
         self.speculationTimeSavedMs = speculationTimeSavedMs

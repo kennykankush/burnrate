@@ -1,5 +1,6 @@
 import AppKit
 import BurnrateCore
+import Charts
 import SwiftUI
 
 // MARK: - Claude content stack
@@ -199,7 +200,7 @@ struct ClaudeTodayRichCard: View {
             }
 
             ClaudeHourlySparkline(hours: breakdown.hourBuckets, currentHour: currentHour)
-                .frame(height: 32)
+                .frame(height: 44)
 
             HStack {
                 Text("00")
@@ -278,35 +279,55 @@ struct ClaudeTodayRichCard: View {
     }
 }
 
-private struct ClaudeHourlySparkline: View {
+struct ClaudeHourlySparkline: View {
     let hours: [Int]
     let currentHour: Int
 
-    var body: some View {
-        GeometryReader { proxy in
-            let peak = hours.max() ?? 0
-            let safePeak = peak == 0 ? 1 : Double(peak)
-            let count = hours.count
-            let barWidth = count > 0 ? proxy.size.width / CGFloat(count) - 1 : 0
-            HStack(alignment: .bottom, spacing: 1) {
-                ForEach(0..<24, id: \.self) { idx in
-                    let v = idx < hours.count ? hours[idx] : 0
-                    let isCurrent = idx == self.currentHour
-                    let isPast = idx < self.currentHour
-                    let height = Swift.max(2, proxy.size.height * (Double(v) / safePeak))
-                    Capsule(style: .continuous)
-                        .fill(self.color(value: v, isCurrent: isCurrent, isPast: isPast))
-                        .frame(width: barWidth, height: height)
-                }
-            }
+    private struct HourBucket: Identifiable {
+        let id: Int
+        let count: Int
+        let kind: HourKind
+    }
+
+    private enum HourKind { case past, current, future, zero }
+
+    private var buckets: [HourBucket] {
+        (0..<24).map { idx in
+            let count = idx < self.hours.count ? self.hours[idx] : 0
+            let kind: HourKind
+            if count == 0 { kind = .zero }
+            else if idx == self.currentHour { kind = .current }
+            else if idx < self.currentHour { kind = .past }
+            else { kind = .future }
+            return HourBucket(id: idx, count: count, kind: kind)
         }
     }
 
-    private func color(value: Int, isCurrent: Bool, isPast: Bool) -> Color {
-        if isCurrent { return DesignSystem.Colors.accent(for: .claude) }
-        if value == 0 { return Color.white.opacity(0.10) }
-        if isPast { return DesignSystem.Colors.accent(for: .claude).opacity(0.55) }
-        return Color.white.opacity(0.18)
+    var body: some View {
+        let peak = max(1, self.hours.max() ?? 1)
+        Chart(self.buckets) { bucket in
+            BarMark(
+                x: .value("Hour", bucket.id),
+                y: .value("Activity", bucket.count),
+                width: .fixed(9))
+                .foregroundStyle(self.color(for: bucket.kind))
+                .cornerRadius(2)
+                .accessibilityLabel("Hour \(bucket.id)")
+                .accessibilityValue("\(bucket.count) requests")
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .chartYScale(domain: 0...Double(peak))
+        .chartLegend(.hidden)
+    }
+
+    private func color(for kind: HourKind) -> Color {
+        switch kind {
+        case .current: return DesignSystem.Colors.brandLavender
+        case .past: return DesignSystem.Colors.brandLavender.opacity(0.55)
+        case .future: return Color.white.opacity(0.20)
+        case .zero: return Color.white.opacity(0.10)
+        }
     }
 }
 
@@ -711,7 +732,7 @@ struct ClaudeSparklineCard: View {
                 }
             }
             ClaudeSparkline(values: aggregate.recentDayTokens.map { $0.totalTokens })
-                .frame(height: 36)
+                .frame(height: 48)
         }
         .padding(10)
         .premiumCard(accent: DesignSystem.Colors.accent(for: .claude), includeGlow: false)
@@ -723,30 +744,51 @@ struct ClaudeSparklineCard: View {
     }
 }
 
-private struct ClaudeSparkline: View {
+struct ClaudeSparkline: View {
     let values: [Int]
 
-    var body: some View {
-        GeometryReader { proxy in
-            let peak = values.max() ?? 0
-            let safePeak = peak == 0 ? 1 : Double(peak)
-            let count = values.count
-            let barWidth = count > 0 ? proxy.size.width / CGFloat(count) - 1 : 0
-            HStack(alignment: .bottom, spacing: 1) {
-                ForEach(Array(values.enumerated()), id: \.offset) { _, v in
-                    Capsule(style: .continuous)
-                        .fill(self.color(for: v, peak: safePeak))
-                        .frame(width: barWidth, height: Swift.max(2, proxy.size.height * (Double(v) / safePeak)))
-                }
-            }
+    private struct DayBucket: Identifiable {
+        let id: Int
+        let value: Int
+    }
+
+    private var buckets: [DayBucket] {
+        self.values.enumerated().map { idx, v in
+            DayBucket(id: idx, value: v)
         }
     }
 
-    private func color(for value: Int, peak: Double) -> Color {
-        let ratio = Double(value) / peak
-        if ratio > 0.85 { return DesignSystem.Colors.accent(for: .claude) }
-        if ratio > 0.45 { return DesignSystem.Colors.accent(for: .claude).opacity(0.75) }
-        return Color.white.opacity(0.18)
+    var body: some View {
+        let peakValue = max(1, self.values.max() ?? 1)
+        let accent = DesignSystem.Colors.brandLavender
+        Chart(self.buckets) { bucket in
+            AreaMark(
+                x: .value("Day", bucket.id),
+                y: .value("Tokens", bucket.value))
+                .foregroundStyle(
+                    .linearGradient(
+                        colors: [
+                            accent.opacity(0.55),
+                            accent.opacity(0.05),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom))
+                .interpolationMethod(.catmullRom)
+                .accessibilityLabel("Day \(bucket.id + 1)")
+                .accessibilityValue("\(bucket.value) tokens")
+
+            LineMark(
+                x: .value("Day", bucket.id),
+                y: .value("Tokens", bucket.value))
+                .foregroundStyle(accent)
+                .lineStyle(StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                .interpolationMethod(.catmullRom)
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .chartLegend(.hidden)
+        .chartXScale(domain: -0.5...(Double(self.values.count) - 0.5))
+        .chartYScale(domain: 0...Double(peakValue))
     }
 }
 

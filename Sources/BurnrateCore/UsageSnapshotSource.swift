@@ -3,10 +3,10 @@ import Foundation
 public actor UsageSnapshotSource {
     public init() {}
 
-    public func loadOverview() async throws -> UsageOverview {
+    public func loadOverview(recentDailySpend: Double? = nil) async throws -> UsageOverview {
         let now = Date()
         async let codexAsync = CodexUsageFetcher().loadSnapshot(now: now)
-        async let claudeAsync = ClaudeUsageWatcher().loadSnapshot(now: now)
+        async let claudeAsync = ClaudeUsageWatcher().loadSnapshot(now: now, recentDailySpend: recentDailySpend)
         let codex = await codexAsync ?? Self.sampleCodex(now: now)
         let claude = await claudeAsync ?? Self.sampleClaude(now: now)
         return UsageOverview(
@@ -356,7 +356,13 @@ private struct CodexSessionWatcher {
         let totalOutput = tokenSamples.reduce(0) { $0 + $1.output }
         let totalCached = tokenSamples.reduce(0) { $0 + $1.cached }
         let totalReasoning = tokenSamples.reduce(0) { $0 + $1.reasoning }
-        let averageGrowth = Self.averagePositiveGrowth(tokenSamples.map(\.used)) ?? Self.average(tokenSamples.suffix(5).map(\.used))
+        // Per-turn growth = mean of positive deltas in `used` tokens
+        // (filters compactions, since those produce negatives). Returns
+        // nil when no positive deltas exist yet — we deliberately do NOT
+        // fall back to averaging raw `.used` values: those are absolute
+        // sizes (~100K–1M), not per-turn deltas (~5–20K), and mixing
+        // units made `estimatedMessagesRemaining` nonsensical.
+        let averageGrowth = Self.averagePositiveGrowth(tokenSamples.map(\.used))
         let activeMinutes = Self.minutes(from: firstDate, to: latestDate)
         let project = directory.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
         let curatedFlightEvents = Self.curatedFlightEvents(flightEvents)
