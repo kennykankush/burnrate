@@ -9,6 +9,10 @@ BIN=".build/$CONFIG/burnrate"
 BUNDLE=".build/$CONFIG/burnrate_Burnrate.bundle"
 
 pkill -x burnrate 2>/dev/null || true
+# Also nuke the cask install if it's running — it shares our bundle ID,
+# so LaunchServices can otherwise redirect `open` to /Applications/.
+osascript -e 'tell application id "fyi.burnrate.app" to quit' 2>/dev/null || true
+sleep 0.2
 
 swift build ${CONFIG:+-c "$CONFIG"}
 
@@ -90,5 +94,8 @@ else
   codesign --force --deep --sign - "$APP" 2>&1 | grep -v "replacing existing signature" || true
 fi
 
-open "$APP"
-echo "launched $APP"
+# `open -n` forces a brand-new instance; without it, LaunchServices
+# can route to the cask install at /Applications/burnrate.app since both
+# share bundle id fyi.burnrate.app.
+open -n "$APP"
+echo "launched $APP (pid=$(pgrep -n -x burnrate 2>/dev/null || echo '?'))"

@@ -108,6 +108,12 @@ public struct ClaudeOAuthUsage: Sendable {
     public let sevenDayOAuthApps: Window?
     public let extraUsage: ExtraUsage?
     public let rateLimitTier: String?
+    /// Subscription type from the keychain credential envelope (e.g.
+    /// "max", "pro", "max_20x"). Carried alongside the API response
+    /// so plan-name resolution can fall back on it when the API
+    /// doesn't return `rate_limit_tier`. The keychain value is the
+    /// most reliable local plan signal Claude Code stores.
+    public let subscriptionType: String?
 
     public var hasAnyWindow: Bool {
         return fiveHour != nil || sevenDay != nil || sevenDayOpus != nil || sevenDaySonnet != nil
@@ -135,13 +141,16 @@ public actor ClaudeOAuthUsageFetcher {
                 return nil
             }
             let raw = try JSONDecoder().decode(OAuthUsageRaw.self, from: data)
-            return Self.decode(raw)
+            return Self.decode(raw, subscriptionType: credentials.subscriptionType)
         } catch {
             return nil
         }
     }
 
-    private static func decode(_ raw: OAuthUsageRaw) -> ClaudeOAuthUsage {
+    private static func decode(
+        _ raw: OAuthUsageRaw,
+        subscriptionType: String?) -> ClaudeOAuthUsage
+    {
         return ClaudeOAuthUsage(
             fiveHour: raw.fiveHour.map(window),
             sevenDay: raw.sevenDay.map(window),
@@ -156,7 +165,8 @@ public actor ClaudeOAuthUsageFetcher {
                     utilization: extra.utilization ?? 0,
                     currency: extra.currency ?? "USD")
             },
-            rateLimitTier: raw.rateLimitTier)
+            rateLimitTier: raw.rateLimitTier,
+            subscriptionType: subscriptionType)
     }
 
     private static func window(_ raw: WindowRaw) -> ClaudeOAuthUsage.Window {

@@ -78,6 +78,12 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
     public let creditBalance: Double?
     public let extraSpend: ProviderSpend?
     public let streakDays: Int
+    /// Sessions that have shown activity recently — driven by the
+    /// session-meta file's mtime for Claude and the rollout file's
+    /// mtime for Codex. Populated even when only the freshest session
+    /// is selected as the canonical `claudeSession`/`codexSession`
+    /// for the snapshot, so consumers can detect concurrent burns.
+    public let liveSessions: [LiveSession]
     public let updatedAt: Date
 
     public init(
@@ -101,6 +107,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         creditBalance: Double?,
         extraSpend: ProviderSpend?,
         streakDays: Int = 0,
+        liveSessions: [LiveSession] = [],
         updatedAt: Date = Date())
     {
         self.kind = kind
@@ -123,6 +130,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         self.creditBalance = creditBalance
         self.extraSpend = extraSpend
         self.streakDays = streakDays
+        self.liveSessions = liveSessions
         self.updatedAt = updatedAt
     }
 
@@ -163,6 +171,35 @@ public struct ProviderSpend: Codable, Equatable, Sendable {
         self.used = used
         self.limit = limit
         self.currencyCode = currencyCode
+    }
+}
+
+/// Lightweight record of a session that's actively burning. Distinct
+/// from `ClaudeSessionStats` / `CodexSession` — those only describe
+/// the canonical selected session. `LiveSession` captures the slim
+/// metadata needed to count concurrent activity and label the projects.
+public struct LiveSession: Codable, Equatable, Sendable, Identifiable {
+    public var id: String { self.sessionId }
+
+    public let sessionId: String
+    public let projectName: String
+    public let lastActivityAt: Date
+    /// First meaningful user message — Claude Code's own `/resume`
+    /// picker uses this as the conversation name. Truncated to a
+    /// human-readable length, with caveats and slash commands
+    /// skipped. Nil when no user message has landed yet.
+    public let displayName: String?
+
+    public init(
+        sessionId: String,
+        projectName: String,
+        lastActivityAt: Date,
+        displayName: String? = nil)
+    {
+        self.sessionId = sessionId
+        self.projectName = projectName
+        self.lastActivityAt = lastActivityAt
+        self.displayName = displayName
     }
 }
 

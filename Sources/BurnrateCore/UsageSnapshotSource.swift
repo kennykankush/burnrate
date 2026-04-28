@@ -3,10 +3,16 @@ import Foundation
 public actor UsageSnapshotSource {
     public init() {}
 
-    public func loadOverview(recentDailySpend: Double? = nil) async throws -> UsageOverview {
+    public func loadOverview(
+        recentDailySpend: Double? = nil,
+        pinnedClaudeSessionId: String? = nil) async throws -> UsageOverview
+    {
         let now = Date()
         async let codexAsync = CodexUsageFetcher().loadSnapshot(now: now)
-        async let claudeAsync = ClaudeUsageWatcher().loadSnapshot(now: now, recentDailySpend: recentDailySpend)
+        async let claudeAsync = ClaudeUsageWatcher().loadSnapshot(
+            now: now,
+            recentDailySpend: recentDailySpend,
+            pinnedSessionId: pinnedClaudeSessionId)
         let codex = await codexAsync ?? Self.sampleCodex(now: now)
         let claude = await claudeAsync ?? Self.sampleClaude(now: now)
         return UsageOverview(
@@ -90,9 +96,14 @@ public actor UsageSnapshotSource {
 
 private struct CodexUsageFetcher {
     func loadSnapshot(now: Date) async -> ProviderUsageSnapshot? {
-        let local = CodexSessionWatcher().latestSnapshot()
+        let watcher = CodexSessionWatcher()
+        let local = watcher.latestSnapshot()
+        let liveSessions = watcher.liveSessions(now: now)
         if let local {
-            return local.providerSnapshot(accountLabel: "Local Codex", now: now)
+            return local.providerSnapshot(
+                accountLabel: "Local Codex",
+                now: now,
+                liveSessions: liveSessions)
         }
 
         let payload = try? await Self.remoteUsagePayload()
@@ -592,6 +603,57 @@ private struct CodexSessionWatcher {
         return candidates.max { $0.modified < $1.modified }?.url
     }
 
+    /// All Codex jsonl session files modified within `thresholdSeconds`,
+    /// converted to `LiveSession` records. Project name is extracted by
+    /// reading the leading `session_meta`/`turn_context` payload of each
+    /// file (the cwd lives there). Falls back to the filename basename.
+    func liveSessions(now: Date, thresholdSeconds: TimeInterval = 600) -> [LiveSession] {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return [] }
+
+        let cutoff = now.addingTimeInterval(-thresholdSeconds)
+        var live: [LiveSession] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            guard let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate),
+                  mtime >= cutoff
+            else { continue }
+            let projectName = Self.extractProjectName(from: url)
+                ?? url.deletingPathExtension().lastPathComponent
+            let sessionId = url.deletingPathExtension().lastPathComponent
+            live.append(LiveSession(
+                sessionId: sessionId,
+                projectName: projectName,
+                lastActivityAt: mtime))
+        }
+        return live.sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    private static func extractProjectName(from url: URL) -> String? {
+        // Read the leading slice of the jsonl — the session_meta record
+        // (with `cwd`) is on or near line 1, so 8KB is more than enough.
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 8192),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        for line in text.split(separator: "\n") {
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+            if let payload = obj["payload"] as? [String: Any],
+               let cwd = payload["cwd"] as? String
+            {
+                return URL(fileURLWithPath: cwd).lastPathComponent
+            }
+        }
+        return nil
+    }
+
     private static func rateLimit(from payload: [String: Any]) -> LocalRateLimit? {
         guard let rateLimits = payload["rate_limits"] as? [String: Any] else { return nil }
 
@@ -722,7 +784,7 @@ private struct CodexLocalSnapshot {
     let today: DailyUsageStats
     let modelMix: [ModelUsageShare]
 
-    func providerSnapshot(accountLabel: String, now: Date) -> ProviderUsageSnapshot {
+    func providerSnapshot(accountLabel: String, now: Date, liveSessions: [LiveSession] = []) -> ProviderUsageSnapshot {
         ProviderUsageSnapshot(
             kind: .codex,
             planName: self.planName,
@@ -737,6 +799,7 @@ private struct CodexLocalSnapshot {
             creditBalance: self.creditBalance,
             extraSpend: nil,
             streakDays: 0,
+            liveSessions: liveSessions,
             updatedAt: now)
     }
 }

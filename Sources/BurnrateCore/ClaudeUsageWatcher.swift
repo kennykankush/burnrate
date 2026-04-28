@@ -1,16 +1,27 @@
 import Foundation
+import os.log
+
+private let log = Logger(subsystem: "fyi.burnrate.app", category: "claudeWatcher")
 
 public actor ClaudeUsageWatcher {
     public init() {}
 
-    public func loadSnapshot(now: Date, recentDailySpend: Double? = nil) async -> ProviderUsageSnapshot? {
+    public func loadSnapshot(
+        now: Date,
+        recentDailySpend: Double? = nil,
+        pinnedSessionId: String? = nil) async -> ProviderUsageSnapshot?
+    {
         let root = Self.claudeRoot()
         guard FileManager.default.fileExists(atPath: root.path) else { return nil }
 
         let baseAggregate = self.readAggregate(root: root)
         let sessionMetas = self.readSessionMetas(root: root)
         let facets = self.readLatestFacets(root: root, metas: sessionMetas)
-        let liveSession = self.readLiveSession(root: root, facets: facets, now: now)
+        let liveSession = self.readLiveSession(
+            root: root,
+            facets: facets,
+            now: now,
+            pinnedSessionId: pinnedSessionId)
         let oauth = await self.readOAuthUsage(root: root)
         let leaderboard = self.scanRecentJsonlsForTools(root: root, limit: 20)
         let betaGates = self.readBetaGates(root: root)
@@ -56,6 +67,8 @@ public actor ClaudeUsageWatcher {
             liveSession: liveSession,
             currentProject: projectLabel)
 
+        let liveSessions = self.readLiveSessions(root: root, now: now)
+
         return ProviderUsageSnapshot(
             kind: .claude,
             planName: self.planName(from: oauth, aggregate: aggregate, liveSession: liveSession),
@@ -79,6 +92,7 @@ public actor ClaudeUsageWatcher {
                 ProviderSpend(used: $0.usedCredits, limit: $0.monthlyLimit, currencyCode: $0.currency)
             },
             streakDays: aggregate?.streakDays ?? 0,
+            liveSessions: liveSessions,
             updatedAt: now)
     }
 
@@ -121,7 +135,23 @@ public actor ClaudeUsageWatcher {
 
     private func readOAuthUsage(root: URL) async -> ClaudeOAuthUsage? {
         guard let creds = ClaudeOAuthCredentialReader.read(claudeRoot: root) else { return nil }
-        return await ClaudeOAuthUsageFetcher().fetch(credentials: creds)
+        if let usage = await ClaudeOAuthUsageFetcher().fetch(credentials: creds) {
+            return usage
+        }
+        // API fetch failed (network, timeout, expired token, beta
+        // header drift). Still surface a minimal record so the
+        // keychain's `subscriptionType` survives — without this,
+        // a flaky API would erase every plan-name signal we have
+        // and the badge would tumble all the way down to "Pro/Max".
+        return ClaudeOAuthUsage(
+            fiveHour: nil,
+            sevenDay: nil,
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            sevenDayOAuthApps: nil,
+            extraUsage: nil,
+            rateLimitTier: nil,
+            subscriptionType: creds.subscriptionType)
     }
 
     private static func claudeRoot() -> URL {
@@ -329,6 +359,202 @@ public actor ClaudeUsageWatcher {
         return metas.sorted { ($0.startTime ?? .distantPast) > ($1.startTime ?? .distantPast) }
     }
 
+    /// Builds the concurrent-session list from the live transcript
+    /// files in `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl` —
+    /// these get appended to in real time during a Claude Code session,
+    /// so file mtime is a faithful "last activity" signal. (The
+    /// session-meta JSONs in `usage-data/session-meta/` are written at
+    /// session end / rollup time and don't reflect in-flight activity.)
+    private func readLiveSessions(root: URL, now: Date, thresholdSeconds: TimeInterval = 600) -> [LiveSession] {
+        let projectsDir = root.appendingPathComponent("projects")
+        guard FileManager.default.fileExists(atPath: projectsDir.path) else { return [] }
+        guard let enumerator = FileManager.default.enumerator(
+            at: projectsDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return [] }
+
+        let cutoff = now.addingTimeInterval(-thresholdSeconds)
+        // Single pass over `~/.claude/sessions/` — returns renamed
+        // titles + the set of sessionIds whose process is actually
+        // running. Lets us skip the jsonl mtime trap (which lingers
+        // for the full threshold after Claude Code exits).
+        let metadata = Self.sessionMetadata(root: root)
+        var live: [LiveSession] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            guard let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate),
+                  mtime >= cutoff
+            else { continue }
+            let sessionId = url.deletingPathExtension().lastPathComponent
+            // If we have a session file for this id, trust it: only
+            // include the session when its pid is alive. If we have
+            // NO session file at all, fall back to the mtime
+            // threshold (covers edge cases like Claude Code being
+            // killed without writing a clean teardown).
+            let hasSessionFile = metadata.names[sessionId] != nil
+                || metadata.liveSessionIds.contains(sessionId)
+            if hasSessionFile,
+               !metadata.liveSessionIds.contains(sessionId)
+            {
+                continue
+            }
+            let projectName = ParsedSessionMeta.projectName(
+                fromEncodedFolder: url.deletingLastPathComponent().lastPathComponent)
+            // Resolution order for the pill name:
+            //   1. User-renamed title from `~/.claude/sessions/*.json`
+            //      — short, intentional, and matches what the user
+            //      sees in Claude Code's session list.
+            //   2. First user message from the jsonl — the
+            //      conversation's de facto topic when no rename.
+            //   3. Project folder name (handled at the view layer).
+            let displayName = metadata.names[sessionId]
+                ?? Self.firstUserMessage(from: url)
+            live.append(LiveSession(
+                sessionId: sessionId,
+                projectName: projectName,
+                lastActivityAt: mtime,
+                displayName: displayName))
+        }
+        return live.sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    /// Combined scan of `~/.claude/sessions/*.json` — returns both
+    /// the user's renamed titles and a "this session's process is
+    /// actually alive" check, so callers can do one directory pass
+    /// instead of two.
+    ///
+    /// `liveSessionIds` only includes sessions whose pid passes
+    /// `kill(pid, 0)`. mtime alone is unreliable because the jsonl
+    /// keeps showing recent timestamps for the full 10-minute
+    /// threshold after Claude Code exits — checking the pid catches
+    /// closed windows immediately.
+    private static func sessionMetadata(root: URL) -> (
+        names: [String: String],
+        liveSessionIds: Set<String>)
+    {
+        let sessionsDir = root.appendingPathComponent("sessions")
+        guard FileManager.default.fileExists(atPath: sessionsDir.path) else {
+            return (names: [:], liveSessionIds: [])
+        }
+        guard let enumerator = FileManager.default.enumerator(
+            at: sessionsDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants])
+        else {
+            return (names: [:], liveSessionIds: [])
+        }
+        var names: [String: String] = [:]
+        var live: Set<String> = []
+        for case let url as URL in enumerator where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessionId = json["sessionId"] as? String
+            else { continue }
+            if let name = json["name"] as? String, !name.isEmpty {
+                names[sessionId] = name
+            }
+            if let pid = json["pid"] as? Int, Self.isProcessAlive(pid: pid) {
+                live.insert(sessionId)
+            }
+        }
+        return (names: names, liveSessionIds: live)
+    }
+
+    /// `kill(pid, 0)` sends signal 0 — a no-op that returns 0 if the
+    /// process exists and -1/ESRCH if it doesn't. Same-user processes
+    /// won't EPERM, so the simple check is enough here.
+    private static func isProcessAlive(pid: Int) -> Bool {
+        kill(Int32(pid), 0) == 0
+    }
+
+    /// Reads a session jsonl and returns the first meaningful user
+    /// message, formatted as a short conversation name. Mirrors
+    /// Claude Code's own `/resume` heuristic — first non-caveat,
+    /// non-slash-command, non-attachment user text. Truncated to ~40
+    /// chars so it fits a pill. Returns nil when no qualifying
+    /// message has landed yet (cold-start sessions).
+    ///
+    /// We stream-parse the file line-by-line and bail after finding
+    /// the first match (or after 200 lines as a safety bound) so
+    /// large transcripts don't cost much on every poll.
+    private static func firstUserMessage(from url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        // Read up to ~256KB which comfortably covers the opening
+        // turns of any session — the first user message is almost
+        // always within the first few hundred lines.
+        guard let data = try? handle.read(upToCount: 256 * 1024) else { return nil }
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+
+        var inspected = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            inspected += 1
+            if inspected > 200 { break }
+
+            guard let lineData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+            else { continue }
+            guard json["type"] as? String == "user" else { continue }
+
+            // The message text can be either a plain string or an
+            // array of content blocks. Walk both shapes.
+            let raw = Self.extractUserText(from: json)
+            guard let trimmed = Self.cleanFirstMessage(raw) else { continue }
+            return trimmed
+        }
+        return nil
+    }
+
+    /// Walks both possible shapes for `message.content` (string or
+    /// array of content blocks) and pulls out the first text we can
+    /// find. Skips tool-use blocks, attachments, and other non-text
+    /// content types.
+    private static func extractUserText(from json: [String: Any]) -> String? {
+        guard let message = json["message"] as? [String: Any] else { return nil }
+        if let content = message["content"] as? String { return content }
+        if let blocks = message["content"] as? [[String: Any]] {
+            for block in blocks {
+                if block["type"] as? String == "text",
+                   let text = block["text"] as? String, !text.isEmpty
+                {
+                    return text
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Filters out caveats and slash commands, trims whitespace,
+    /// strips newlines, and truncates to a pill-friendly length.
+    /// Returns nil for messages that don't qualify as a name —
+    /// callers should keep walking the file in that case.
+    private static func cleanFirstMessage(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        // <local-command-caveat> blocks are wrapper text injected by
+        // CLI commands like /clear or /compact — never user intent.
+        if trimmed.hasPrefix("<local-command-caveat>") { return nil }
+        // Slash commands (`/usage`, `/clear`, etc.) describe an
+        // action, not a topic. Skip so we land on the first
+        // substantive message.
+        if trimmed.hasPrefix("/") { return nil }
+        // Collapse internal newlines into spaces so the pill stays
+        // a single line.
+        let oneLine = trimmed
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+        // Truncate aggressively — pills are narrow and renamed
+        // session titles are typically short ("NOTCH", "fix bugs").
+        // 32 chars matches that scale; the pill view also middle-
+        // truncates, so this is a memory bound, not a layout one.
+        let maxLength = 32
+        if oneLine.count <= maxLength { return oneLine }
+        let endIndex = oneLine.index(oneLine.startIndex, offsetBy: maxLength)
+        return oneLine[..<endIndex].trimmingCharacters(in: .whitespaces) + "…"
+    }
+
     // MARK: - facets
 
     private func readLatestFacets(root: URL, metas: [ParsedSessionMeta]) -> ClaudeFacets? {
@@ -382,11 +608,55 @@ public actor ClaudeUsageWatcher {
 
     // MARK: - live JSONL session
 
-    private func readLiveSession(root: URL, facets: ClaudeFacets?, now: Date) -> ClaudeSessionStats? {
+    private func readLiveSession(
+        root: URL,
+        facets: ClaudeFacets?,
+        now: Date,
+        pinnedSessionId: String? = nil) -> ClaudeSessionStats?
+    {
         let projectsDir = root.appendingPathComponent("projects")
         guard FileManager.default.fileExists(atPath: projectsDir.path) else { return nil }
+
+        // Honor the pinned session if its jsonl exists; the user
+        // explicitly chose this one and we shouldn't drift to a
+        // newer-mtime sibling without their consent. If the pinned
+        // file is missing (renamed/deleted), fall through to latest.
+        if let pinnedId = pinnedSessionId {
+            if let pinnedURL = Self.findJsonl(in: projectsDir, sessionId: pinnedId) {
+                if let session = Self.parseLiveJsonl(
+                    url: pinnedURL,
+                    root: root,
+                    facets: facets,
+                    now: now)
+                {
+                    log.info("readLiveSession: using pinned id=\(pinnedId, privacy: .public) project=\(session.projectName ?? "?", privacy: .public)")
+                    return session
+                } else {
+                    log.warning("readLiveSession: pinned id=\(pinnedId, privacy: .public) jsonl found but failed to parse, falling back to latest")
+                }
+            } else {
+                log.warning("readLiveSession: pinned id=\(pinnedId, privacy: .public) jsonl NOT FOUND, falling back to latest")
+            }
+        }
+
         guard let latest = Self.latestJsonl(in: projectsDir) else { return nil }
-        return Self.parseLiveJsonl(url: latest, root: root, facets: facets, now: now)
+        let session = Self.parseLiveJsonl(url: latest, root: root, facets: facets, now: now)
+        log.info("readLiveSession: using latest path=\(latest.lastPathComponent, privacy: .public) project=\(session?.projectName ?? "?", privacy: .public)")
+        return session
+    }
+
+    private static func findJsonl(in directory: URL, sessionId: String) -> URL? {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return nil }
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            if url.deletingPathExtension().lastPathComponent == sessionId {
+                return url
+            }
+        }
+        return nil
     }
 
     private static func latestJsonl(in directory: URL) -> URL? {
@@ -2726,6 +2996,14 @@ public actor ClaudeUsageWatcher {
         // between tiers: Pro ≈ $200, Max 5× ≈ $1–2k, Max 20× = $10k+.
         if let extra = oauth?.extraUsage, extra.monthlyLimit > 0 {
             return Self.prettyPlanName(forMonthlyLimit: extra.monthlyLimit)
+        }
+        // Keychain credential carries `subscriptionType` (e.g. "max",
+        // "max_20x", "pro"). It's the most reliable local plan signal
+        // Claude Code stores — works even when both the API tier and
+        // overage cap are empty. `prettyPlanName(forTier:)` already
+        // handles "max"/"pro"/"5x"/"20x" patterns.
+        if let sub = oauth?.subscriptionType, !sub.isEmpty {
+            return Self.prettyPlanName(forTier: sub)
         }
         if (aggregate?.totalSessions ?? 0) > 50 { return "Pro/Max" }
         return nil

@@ -274,7 +274,7 @@ private struct TabContent: View {
                         NowView(
                             snapshot: snapshot,
                             overview: self.model.overview,
-                            turnPattern: self.model.turnPatterns[snapshot.kind],
+                            turnPattern: self.turnPattern(for: snapshot),
                             model: self.model)
                     case .patterns: PatternsView(snapshot: snapshot)
                     case .wrap: WrapView(snapshot: snapshot)
@@ -293,6 +293,14 @@ private struct TabContent: View {
         // Same spring as the pill morph — pill + content move as one motion
         .animation(.spring(response: 0.32, dampingFraction: 0.72), value: self.model.activeTab)
         .animation(.spring(response: 0.32, dampingFraction: 0.72), value: self.model.selectedProvider)
+    }
+
+    private func turnPattern(for snapshot: ProviderUsageSnapshot) -> MenuBarModel.TurnPattern? {
+        guard let context = snapshot.workContext else { return nil }
+        let pattern = self.model.turnPattern(
+            forSessionId: context.sessionId,
+            provider: snapshot.kind)
+        return pattern.hasEnoughData ? pattern : nil
     }
 }
 
@@ -329,6 +337,16 @@ private struct StatuslineFooter: View {
 
                 Button(self.model.alertMode.title) {
                     self.model.cycleAlertMode()
+                }
+
+                Button {
+                    self.model.setNotchEnabled(!self.model.notchEnabled)
+                } label: {
+                    if self.model.notchEnabled {
+                        Label("Show in notch (M-series MacBook)", systemImage: "checkmark")
+                    } else {
+                        Text("Show in notch (M-series MacBook)")
+                    }
                 }
 
                 Button {

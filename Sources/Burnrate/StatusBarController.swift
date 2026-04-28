@@ -161,6 +161,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         guard let stack = self.stackView else { return }
         let display = self.model.menuBarDisplay
         stack.update(label: display.label, value: display.value)
+        let targetWidth = ceil(stack.intrinsicContentSize.width) + 14
+        self.statusItem?.length = max(34, targetWidth)
     }
 
     nonisolated func popoverDidClose(_ notification: Notification) {

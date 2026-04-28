@@ -29,6 +29,7 @@ struct BurnrateAppScene: App {
 final class BurnrateAppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private let model = MenuBarModel()
     private var statusController: StatusBarController?
+    private var notchPresenter: NotchPresenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. This is a status-bar app.
@@ -36,6 +37,23 @@ final class BurnrateAppDelegate: NSObject, NSApplicationDelegate, ObservableObje
 
         FontRegistration.registerBundledFonts()
         self.statusController = StatusBarController(model: self.model)
+        self.notchPresenter = NotchPresenter(model: self.model)
+
+        // Both the status bar label and the notch compact view need to
+        // re-render on every refresh tick. Chain them off the same hook
+        // so the model only needs one callback. `refresh()` (not
+        // `updateDisplay`) so the toggle-on/off path also runs through
+        // here when `setNotchEnabled` fires the hook.
+        let existingHook = self.model.onSnapshotChanged
+        self.model.onSnapshotChanged = { [weak self] in
+            existingHook?()
+            self?.notchPresenter?.refresh()
+        }
+
+        // Kick the refresh loop here, not from the popover's .onAppear.
+        // The notch alcove needs to render real data the moment the
+        // user hovers it — even if they've never opened the popover.
+        self.model.start()
     }
 }
 

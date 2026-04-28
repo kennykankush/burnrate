@@ -1,6 +1,7 @@
 import BurnrateCore
 import Foundation
 import Observation
+import SwiftUI
 
 enum AppTab: String, CaseIterable, Identifiable {
     case now
@@ -36,6 +37,141 @@ enum AppTab: String, CaseIterable, Identifiable {
         case .patterns: "2"
         case .wrap: "3"
         case .health: "4"
+        }
+    }
+}
+
+/// Choreography of the notch alcove's open animation. Every case spawns
+/// the alcove FROM the notch silhouette outward — no slides-from-outside.
+/// Inspired by Disney's 12 principles (anticipation, squash & stretch,
+/// follow-through), Dynamic Island morph patterns, and NotchNook/Alcove
+/// references.
+enum AlcoveChoreography: String, CaseIterable, Identifiable {
+    case morph         // 1. Width + height grow together. Default.
+    case cascade       // 2. Height drops first, width fans after.
+    case curtain       // 3. Width spreads first, height drops after.
+    case iris          // 4. Pre-full, scales up from notch.
+    case unfold        // 5. Width pre-set, height grows. Drawer.
+    case bloom         // 6. Corners morph first, dims catch up.
+    case swell         // 7. Width overshoots, settles back.
+    case drip          // 8. Width fast, height with gravity bounce.
+    case squeeze       // 9. Anticipation: w pre-contracts, then expands.
+    case press         // 10. Anticipation: corners tighten, then release.
+    case stagger       // 11. 3-phase: corners → width → height.
+    case ripple        // 12. Bottom corner morphs first, then top, then dims.
+    case balloon       // 13. Both axes overshoot equally.
+    case wobble        // 14. Opens, oscillates over/under target, settles.
+    case echo          // 15. Opens fast, briefly recedes, settles wide.
+    case fall          // 16. Height falls with gravity overshoot, settles.
+    case rebound       // 17. Height drops past, springs back hard.
+    case jelly         // 18. Width stretches wide while height still small.
+    case fountain      // 19. Height grows fast, width fans with overshoot.
+    case liquid        // 20. Both axes overshoot in sequence, settle together.
+
+    var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .morph: "morph"
+        case .cascade: "cascade"
+        case .curtain: "curtain"
+        case .iris: "iris"
+        case .unfold: "unfold"
+        case .bloom: "bloom"
+        case .swell: "swell"
+        case .drip: "drip"
+        case .squeeze: "squeeze"
+        case .press: "press"
+        case .stagger: "stagger"
+        case .ripple: "ripple"
+        case .balloon: "balloon"
+        case .wobble: "wobble"
+        case .echo: "echo"
+        case .fall: "fall"
+        case .rebound: "rebound"
+        case .jelly: "jelly"
+        case .fountain: "fountain"
+        case .liquid: "liquid"
+        }
+    }
+
+    /// Approximate total duration. Used to schedule the content fade-in
+    /// so it lands as the geometry settles.
+    var totalDuration: Double {
+        switch self {
+        case .morph: return 0.34
+        case .cascade, .curtain: return 0.42
+        case .iris, .unfold: return 0.36
+        case .bloom: return 0.46
+        case .swell: return 0.50
+        case .drip: return 0.50
+        case .squeeze, .press: return 0.46
+        case .stagger: return 0.50
+        case .ripple: return 0.50
+        case .balloon: return 0.50
+        case .wobble: return 0.58
+        case .echo: return 0.54
+        case .fall: return 0.50
+        case .rebound: return 0.58
+        case .jelly: return 0.54
+        case .fountain: return 0.50
+        case .liquid: return 0.60
+        }
+    }
+}
+
+/// Spring intensity that wraps every choreography. Independent dial —
+/// you can pair any choreography with any spring to taste.
+enum AlcoveSpring: String, CaseIterable, Identifiable {
+    /// Confident default. Low overshoot, NotchNook feel.
+    case smooth
+    /// Very fast, no bounce. Linear/Raycast snap.
+    case snappy
+    /// Visible overshoot. Playful.
+    case bouncy
+    /// Slow, gentle. Big calm reveal.
+    case soft
+    /// Dramatic overshoot. Toy-like.
+    case elastic
+    /// Quick + bouncy. Punchy.
+    case pop
+
+    var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .smooth: "smooth"
+        case .snappy: "snappy"
+        case .bouncy: "bouncy"
+        case .soft: "soft"
+        case .elastic: "elastic"
+        case .pop: "pop"
+        }
+    }
+
+    /// Base spring curve. Choreographies may layer additional per-axis
+    /// curves on top (e.g. drip's gravity-pulled height bounce).
+    func baseSpring(for choreography: AlcoveChoreography) -> Animation {
+        switch self {
+        case .smooth:  return .spring(duration: 0.32, bounce: 0.15)
+        case .snappy:  return .spring(duration: 0.22, bounce: 0)
+        case .bouncy:  return .spring(duration: 0.40, bounce: 0.32)
+        case .soft:    return .spring(duration: 0.50, bounce: 0.06)
+        case .elastic: return .spring(duration: 0.58, bounce: 0.46)
+        case .pop:     return .spring(duration: 0.30, bounce: 0.28)
+        }
+    }
+
+    /// Multiplier applied to per-choreography duration when scheduling
+    /// content fade-in. Bouncy/elastic springs settle later.
+    var contentDelayMultiplier: Double {
+        switch self {
+        case .smooth:  return 0.85
+        case .snappy:  return 0.70
+        case .bouncy:  return 1.05
+        case .soft:    return 1.10
+        case .elastic: return 1.20
+        case .pop:     return 0.95
         }
     }
 }
@@ -110,6 +246,45 @@ final class MenuBarModel {
     var alertMode: UsageAlertMode = UsageAlertMode(rawValue: UserDefaults.standard.string(forKey: UsageNotificationController.alertModeKey) ?? "") ?? .all
     var isLaunchAtLoginEnabled: Bool = LaunchAtLoginManager.isEnabled
     var selectedMenuBarModule: MenuBarModule = MenuBarModule(rawValue: UserDefaults.standard.string(forKey: MenuBarModel.menuBarModuleKey) ?? "") ?? .context
+    /// User-controlled toggle for the notch widget. Default is the
+    /// negation of "is the user even on a notched MacBook" so notch-less
+    /// users never see a stray rounded pill at the top of their screen.
+    /// On notched hardware the default is true.
+    var notchEnabled: Bool = MenuBarModel.loadNotchEnabledDefault()
+    var alcoveChoreography: AlcoveChoreography = AlcoveChoreography(
+        rawValue: UserDefaults.standard.string(forKey: MenuBarModel.alcoveChoreographyKey) ?? ""
+    ) ?? .morph
+    var alcoveSpring: AlcoveSpring = AlcoveSpring(
+        rawValue: UserDefaults.standard.string(forKey: MenuBarModel.alcoveSpringKey) ?? ""
+    ) ?? .smooth
+    /// Master toggle for every haptic the alcove fires. Default OFF
+    /// — macOS trackpad haptics are surprisingly insistent against
+    /// the alcove's silent visual choreography. Opt-in for users
+    /// who want the extra feedback. Read by `HapticGate.enabled` at
+    /// every haptic call site.
+    var hapticsEnabled: Bool = UserDefaults.standard.bool(
+        forKey: MenuBarModel.hapticsEnabledKey)
+    /// Manual width override for the notch silhouette. Nil = auto-detect
+    /// via NSScreen.notchFrame. Used by the calibration UI in the dev
+    /// panel for users where auto-detect is wrong (or who want to nudge
+    /// the silhouette a few pixels for visual fit).
+    var notchWidthOverride: Double? = MenuBarModel.loadOptionalDouble(forKey: MenuBarModel.notchWidthOverrideKey)
+    var notchHeightOverride: Double? = MenuBarModel.loadOptionalDouble(forKey: MenuBarModel.notchHeightOverrideKey)
+    /// Optional Claude session ID the user has pinned via the alcove
+    /// picker. When set, the watcher reads that specific jsonl
+    /// instead of the most-recently-touched one. Persisted across
+    /// launches so the pin survives restarts.
+    var pinnedClaudeSessionId: String? = UserDefaults.standard.string(
+        forKey: MenuBarModel.pinnedClaudeSessionIdKey)
+    /// Transient — set while the user hovers a session pill so the
+    /// alcove previews that session's context without committing to
+    /// a pin. Takes priority over `pinnedClaudeSessionId` when set;
+    /// clears when hover exits. Not persisted.
+    var previewClaudeSessionId: String? = nil
+    /// Transient: true while the user is actively dragging the calibration
+    /// handles on the notch silhouette. Not persisted. The presenter uses
+    /// this to skip its expensive panel-rebuild path during drag ticks.
+    var notchCalibrating: Bool = false
 
     /// Fires after every refresh tick (success or failure) so the
     /// non-SwiftUI status bar label can re-render. SwiftUI views in the
@@ -118,6 +293,27 @@ final class MenuBarModel {
 
     static let activeTabKey = "burnrate.activeTab"
     static let menuBarModuleKey = "burnrate.menuBarModule"
+    static let notchEnabledKey = "burnrate.notchEnabled"
+    static let alcoveChoreographyKey = "burnrate.alcoveChoreography"
+    static let alcoveSpringKey = "burnrate.alcoveSpring"
+    static let hapticsEnabledKey = HapticGate.key
+    static let notchWidthOverrideKey = "burnrate.notchWidthOverride"
+    static let notchHeightOverrideKey = "burnrate.notchHeightOverride"
+    static let pinnedClaudeSessionIdKey = "burnrate.pinnedClaudeSessionId"
+
+    private static func loadOptionalDouble(forKey key: String) -> Double? {
+        UserDefaults.standard.object(forKey: key) as? Double
+    }
+
+    private static func loadNotchEnabledDefault() -> Bool {
+        if let raw = UserDefaults.standard.object(forKey: MenuBarModel.notchEnabledKey) as? Bool {
+            return raw
+        }
+        // Phase 1 default: off until user opts in. Even on notched
+        // hardware we don't want to surprise users with a new always-on
+        // surface on first launch after upgrade.
+        return false
+    }
 
     /// Friendly translation of a thrown error from the snapshot pipeline.
     /// We keep raw `localizedDescription` available for debug, but expose
@@ -234,7 +430,34 @@ final class MenuBarModel {
         static let empty = TurnPattern(samples: [], avg: 0, p90: 0, trend: .flat)
     }
 
-    var turnPatterns: [ProviderKind: TurnPattern] = [:]
+    /// Per-conversation turn-delta patterns. Each pinned/active
+    /// session accumulates its own rolling history, so bucket sizes
+    /// + trend reflect *that conversation's* rhythm rather than a
+    /// global "you-as-a-user" average. Keyed by `sessionId`.
+    var turnPatternsBySession: [String: TurnPattern] = [:]
+
+    /// Provider-wide aggregate, used as a cold-start fallback when a
+    /// session hasn't accumulated enough samples yet (< 3). Built
+    /// from the union of every observed turn for that provider.
+    var turnPatternsByProvider: [ProviderKind: TurnPattern] = [:]
+
+    /// Resolves the right turn-pattern for a given session. Prefers
+    /// session-scoped data once the conversation has accumulated at
+    /// least 3 turns (enough to be meaningful); otherwise falls back
+    /// to the provider-wide aggregate so brand-new sessions still
+    /// get a usable forecast immediately.
+    func turnPattern(
+        forSessionId sessionId: String?,
+        provider: ProviderKind) -> TurnPattern
+    {
+        if let sid = sessionId,
+           let session = self.turnPatternsBySession[sid],
+           session.samples.count >= 3
+        {
+            return session
+        }
+        return self.turnPatternsByProvider[provider] ?? .empty
+    }
 
     /// One snapshot of a window's usage at a point in time. The `resetsAt`
     /// is captured so we can detect window rolls (when it jumps forward,
@@ -287,10 +510,19 @@ final class MenuBarModel {
     private let notificationController = UsageNotificationController()
     private var hasStarted = false
     private var refreshTask: Task<Void, Never>?
+    private var previewRefreshTask: Task<Void, Never>?
     private var fireExpiryTask: Task<Void, Never>?
-    private var prevUserMessageCount: [ProviderKind: Int] = [:]
-    private var prevContextUsedTokens: [ProviderKind: Int] = [:]
-    private var turnDeltaHistory: [ProviderKind: [Int]] = [:]
+    /// Per-session prev-state trackers — keyed by sessionId, not
+    /// provider, so switching between concurrent sessions doesn't
+    /// produce nonsense diffs (session A at 50K → session B at 20K
+    /// would otherwise look like a -30K delta).
+    private var prevUserMessageCount: [String: Int] = [:]
+    private var prevContextUsedTokens: [String: Int] = [:]
+    /// Per-session rolling deltas — drives the session-scoped
+    /// pattern. The provider-wide pattern is built from the union
+    /// of these.
+    private var turnDeltaHistoryBySession: [String: [Int]] = [:]
+    private var turnDeltaHistoryByProvider: [ProviderKind: [Int]] = [:]
     private static let maxTurnHistory = 8
 
     /// Cap on per-window history. At a 30-second refresh cadence, 120
@@ -336,6 +568,111 @@ final class MenuBarModel {
         UserDefaults.standard.set(module.rawValue, forKey: Self.menuBarModuleKey)
     }
 
+    func setNotchEnabled(_ enabled: Bool) {
+        self.notchEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.notchEnabledKey)
+        // Trigger downstream re-rendering so the NotchPresenter activates
+        // or deactivates immediately. Reuses the existing snapshot hook —
+        // semantics are "something visible changed, re-render."
+        self.onSnapshotChanged?()
+    }
+
+    func setAlcoveChoreography(_ choreography: AlcoveChoreography) {
+        self.alcoveChoreography = choreography
+        UserDefaults.standard.set(choreography.rawValue, forKey: Self.alcoveChoreographyKey)
+        self.onSnapshotChanged?()
+    }
+
+    func setHapticsEnabled(_ value: Bool) {
+        self.hapticsEnabled = value
+        UserDefaults.standard.set(value, forKey: Self.hapticsEnabledKey)
+        self.onSnapshotChanged?()
+    }
+
+    func setAlcoveSpring(_ spring: AlcoveSpring) {
+        self.alcoveSpring = spring
+        UserDefaults.standard.set(spring.rawValue, forKey: Self.alcoveSpringKey)
+        self.onSnapshotChanged?()
+    }
+
+    func setNotchWidthOverride(_ value: Double?) {
+        self.notchWidthOverride = value
+        if let value {
+            UserDefaults.standard.set(value, forKey: Self.notchWidthOverrideKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.notchWidthOverrideKey)
+        }
+        self.onSnapshotChanged?()
+    }
+
+    func setPinnedClaudeSessionId(_ value: String?) {
+        self.pinnedClaudeSessionId = value
+        if let value {
+            UserDefaults.standard.set(value, forKey: Self.pinnedClaudeSessionIdKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.pinnedClaudeSessionIdKey)
+        }
+        // Force-refresh — bypasses the isRefreshing guard so the
+        // alcove updates instantly even if a poll happens to be in
+        // flight when the user clicks.
+        Task { @MainActor in await self.refresh(force: true) }
+    }
+
+    /// Set/clear the hover-preview session. Takes priority over the
+    /// pinned session in the watcher path; clearing falls back to pin
+    /// (or auto-detect when no pin set). Triggers a force-refresh so
+    /// the alcove fetches that session's data immediately.
+    func setPreviewClaudeSessionId(_ value: String?) {
+        // Avoid spamming refreshes when hover events fire repeatedly
+        // for the same target.
+        guard self.previewClaudeSessionId != value else { return }
+        self.previewClaudeSessionId = value
+        // Cancel the previous preview fetch so rapid hover scrubbing
+        // doesn't queue up stale results that would flicker through
+        // the UI as each one completes. The refresh body itself also
+        // guards on target-match before writing — belt + suspenders.
+        self.previewRefreshTask?.cancel()
+        self.previewRefreshTask = Task { @MainActor [weak self] in
+            await self?.refresh(force: true)
+        }
+    }
+
+    func setNotchHeightOverride(_ value: Double?) {
+        self.notchHeightOverride = value
+        if let value {
+            UserDefaults.standard.set(value, forKey: Self.notchHeightOverrideKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.notchHeightOverrideKey)
+        }
+        self.onSnapshotChanged?()
+    }
+
+    func setNotchCalibrating(_ value: Bool) {
+        self.notchCalibrating = value
+        self.onSnapshotChanged?()
+    }
+
+    /// Live writes during a calibration drag. Updates the in-memory
+    /// override values so SwiftUI re-renders the notch silhouette at the
+    /// new size, but skips persisting + the snapshot hook so the
+    /// NotchPresenter doesn't tear the NSPanel down on every drag tick.
+    /// Persistence happens once on commit.
+    func setNotchSizeLive(width: Double, height: Double) {
+        self.notchWidthOverride = width
+        self.notchHeightOverride = height
+    }
+
+    func commitNotchCalibration() {
+        if let w = self.notchWidthOverride {
+            UserDefaults.standard.set(w, forKey: Self.notchWidthOverrideKey)
+        }
+        if let h = self.notchHeightOverride {
+            UserDefaults.standard.set(h, forKey: Self.notchHeightOverrideKey)
+        }
+        self.notchCalibrating = false
+        self.onSnapshotChanged?()
+    }
+
     private func firstDepletedWindow() -> UsageWindow? {
         for snap in self.overview.snapshots {
             if let depleted = snap.windows.first(where: { $0.usedPercent >= 99 && $0.resetsAt != nil }) {
@@ -345,16 +682,20 @@ final class MenuBarModel {
         return nil
     }
 
-    private func value(for module: MenuBarModule) -> MenuBarDisplay? {
+    /// Compute the display pair for any module, regardless of which is
+    /// currently selected. Used by the alcove dashboard to render a
+    /// multi-row mini-summary, and by the menu-bar item to resolve the
+    /// user's pick.
+    func value(for module: MenuBarModule) -> MenuBarDisplay? {
         guard let snap = self.selectedSnapshot else { return nil }
         switch module {
         case .context:
             guard let context = snap.workContext else { return nil }
             return MenuBarDisplay(label: module.label, value: "\(Int(context.contextUsedPercent.rounded()))%")
         case .turnsLeft:
-            guard let pattern = self.turnPatterns[snap.kind], pattern.avg > 0,
-                  let context = snap.workContext, context.contextRemainingTokens > 0
-            else { return nil }
+            guard let context = snap.workContext, context.contextRemainingTokens > 0 else { return nil }
+            let pattern = self.turnPattern(forSessionId: context.sessionId, provider: snap.kind)
+            guard pattern.avg > 0 else { return nil }
             let turns = max(0, context.contextRemainingTokens / pattern.avg)
             return MenuBarDisplay(label: module.label, value: "\(turns)")
         case .fiveHour:
@@ -435,6 +776,10 @@ final class MenuBarModel {
         let current = self.selectedProvider
         let next = available.first { $0 != current } ?? current
         self.selectedProvider = next
+        // The popover observes @Observable directly so it re-renders for
+        // free, but the notch's NotchDisplayState only refreshes from
+        // the snapshot hook — fire it so the alcove flips providers too.
+        self.onSnapshotChanged?()
     }
 
     func start() {
@@ -446,19 +791,43 @@ final class MenuBarModel {
             await self.refresh()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
-                await self.refresh()
+                // Skip the tick while the user is hovering a
+                // conversation pill — preview is the override,
+                // a poll mid-hover would clobber whichever session
+                // they're scrubbing through.
+                if self.previewClaudeSessionId == nil {
+                    await self.refresh()
+                }
             }
         }
     }
 
-    func refresh() async {
-        guard !self.isRefreshing else { return }
+    func refresh(force: Bool = false) async {
+        // The 30s polling loop should never collide with itself, but
+        // user-initiated refreshes (pin a session, toggle a setting)
+        // need to bypass the in-flight guard so the alcove updates
+        // immediately instead of waiting up to 30s for the next tick.
+        guard force || !self.isRefreshing else { return }
         self.isRefreshing = true
         defer { self.isRefreshing = false }
 
         do {
             let recentRate = self.recentDailySpendRate(now: Date())
-            let overview = try await self.source.loadOverview(recentDailySpend: recentRate)
+            // Preview wins over pin — hover lets you scrub through
+            // sessions without committing. Click then commits.
+            let targetClaudeSession = self.previewClaudeSessionId
+                ?? self.pinnedClaudeSessionId
+            let overview = try await self.source.loadOverview(
+                recentDailySpend: recentRate,
+                pinnedClaudeSessionId: targetClaudeSession)
+            // Latest-wins: if hover moved while we were fetching,
+            // discard this result. A newer preview task already
+            // fired with the right target — letting this stale
+            // snapshot through would flicker the UI through old
+            // sessions as the queue drains.
+            let currentTarget = self.previewClaudeSessionId
+                ?? self.pinnedClaudeSessionId
+            guard targetClaudeSession == currentTarget else { return }
             self.detectFireEvents(in: overview)
             self.recordWindowSamples(from: overview, now: Date())
             self.recordOverageSamples(from: overview, now: Date())
@@ -483,20 +852,31 @@ final class MenuBarModel {
         for snap in newOverview.snapshots {
             guard let context = snap.workContext else { continue }
 
-            // Bootstrap: if we have no pattern yet for this provider, seed it
-            // from the existing per-turn growth estimate (current context size
-            // ÷ user message count). Means the personalized forecast appears
-            // immediately on first refresh, instead of needing 3+ observed
-            // deltas before kicking in.
-            if (self.turnPatterns[snap.kind]?.samples.isEmpty ?? true),
+            // `WorkContextSnapshot.sessionId` is the active session
+            // whose context we're observing this poll (preview > pin
+            // > auto-detected on Claude; Codex's single live thread).
+            // Single source of truth across providers.
+            guard let sid = context.sessionId else { continue }
+
+            // Bootstrap session-scoped pattern from the
+            // averageGrowthTokens estimate so the bucket forecast
+            // appears immediately for new conversations instead of
+            // needing 3+ observed deltas. The provider-wide pattern
+            // (cold-start fallback) gets the same bootstrap.
+            if (self.turnPatternsBySession[sid]?.samples.isEmpty ?? true),
                let bootstrap = context.averageGrowthTokens, bootstrap > 0
             {
-                self.turnPatterns[snap.kind] = TurnPattern(
+                let seed = TurnPattern(
                     samples: [bootstrap],
                     avg: bootstrap,
                     p90: bootstrap,
                     trend: .flat)
+                self.turnPatternsBySession[sid] = seed
+                if self.turnPatternsByProvider[snap.kind]?.samples.isEmpty ?? true {
+                    self.turnPatternsByProvider[snap.kind] = seed
+                }
             }
+
             let newCount: Int
             switch snap.kind {
             case .claude: newCount = snap.claudeSession?.userMessageCount ?? 0
@@ -504,17 +884,18 @@ final class MenuBarModel {
             }
             let newUsed = context.contextUsedTokens
             defer {
-                self.prevUserMessageCount[snap.kind] = newCount
-                self.prevContextUsedTokens[snap.kind] = newUsed
+                self.prevUserMessageCount[sid] = newCount
+                self.prevContextUsedTokens[sid] = newUsed
             }
-            guard let prevCount = self.prevUserMessageCount[snap.kind],
-                  let prevUsed = self.prevContextUsedTokens[snap.kind],
+            guard let prevCount = self.prevUserMessageCount[sid],
+                  let prevUsed = self.prevContextUsedTokens[sid],
                   newCount > prevCount
             else { continue }
             let turnDelta = max(0, newUsed - prevUsed)
 
-            // Record this turn into the rolling history, recompute pattern.
-            self.recordTurn(provider: snap.kind, delta: turnDelta)
+            // Record this turn — writes both session-scoped and
+            // provider-wide rolling histories.
+            self.recordTurn(sessionId: sid, provider: snap.kind, delta: turnDelta)
 
             // Critical zone + large burn = playing with fire
             if context.contextUsedPercent >= 75, turnDelta >= 35_000 {
@@ -527,43 +908,60 @@ final class MenuBarModel {
         }
     }
 
-    private func recordTurn(provider: ProviderKind, delta: Int) {
+    private func recordTurn(sessionId: String, provider: ProviderKind, delta: Int) {
         // Skip near-zero deltas (likely from compaction or session restarts) —
         // they pollute the average without representing real user activity.
         guard delta >= 500 else { return }
 
-        var history = self.turnDeltaHistory[provider] ?? []
-        history.append(delta)
-        if history.count > Self.maxTurnHistory {
-            history.removeFirst(history.count - Self.maxTurnHistory)
+        // Session-scoped history — the primary source for buckets +
+        // trend when the conversation has enough samples.
+        var sessionHistory = self.turnDeltaHistoryBySession[sessionId] ?? []
+        sessionHistory.append(delta)
+        if sessionHistory.count > Self.maxTurnHistory {
+            sessionHistory.removeFirst(sessionHistory.count - Self.maxTurnHistory)
         }
-        self.turnDeltaHistory[provider] = history
+        self.turnDeltaHistoryBySession[sessionId] = sessionHistory
+        self.turnPatternsBySession[sessionId] = Self.computePattern(samples: sessionHistory)
 
-        // Compute pattern stats. Need at least 1 sample to publish anything.
-        let avg = history.reduce(0, +) / max(1, history.count)
+        // Provider-wide history — cold-start fallback for sessions
+        // that haven't reached 3 samples yet. Built from the same
+        // turn deltas so it's an honest summary of the user's
+        // recent pace across all conversations.
+        var providerHistory = self.turnDeltaHistoryByProvider[provider] ?? []
+        providerHistory.append(delta)
+        if providerHistory.count > Self.maxTurnHistory {
+            providerHistory.removeFirst(providerHistory.count - Self.maxTurnHistory)
+        }
+        self.turnDeltaHistoryByProvider[provider] = providerHistory
+        self.turnPatternsByProvider[provider] = Self.computePattern(samples: providerHistory)
+    }
+
+    /// Builds avg / p90 / trend stats from a turn-delta sample
+    /// list. Extracted from `recordTurn` so the same logic is shared
+    /// between session-scoped and provider-wide pattern updates.
+    private static func computePattern(samples: [Int]) -> TurnPattern {
+        guard !samples.isEmpty else { return .empty }
+        let avg = samples.reduce(0, +) / samples.count
         let p90: Int = {
-            guard history.count > 0 else { return 0 }
-            if history.count <= 4 { return history.max() ?? 0 }
-            let sorted = history.sorted()
+            if samples.count <= 4 { return samples.max() ?? 0 }
+            let sorted = samples.sorted()
             let idx = Int(Double(sorted.count - 1) * 0.9)
             return sorted[idx]
         }()
         let trend: TurnPattern.Trend = {
-            // Need ≥6 samples (3 vs 3) before we'll claim a trend. With
-            // mean-of-half comparisons at 4 samples (2 vs 2), a single
-            // outlier turn could flip the trend; median-of-half at 6 is
-            // robust to a single outlier in either half.
-            guard history.count >= 6 else { return .flat }
-            let half = history.count / 2
-            let older = Self.median(of: Array(history.prefix(half)))
-            let recent = Self.median(of: Array(history.suffix(half)))
+            // Need ≥6 samples (3 vs 3) before we'll claim a trend.
+            // Median-of-half is robust to a single outlier in either
+            // half, which a 4-sample mean comparison wouldn't be.
+            guard samples.count >= 6 else { return .flat }
+            let half = samples.count / 2
+            let older = Self.median(of: Array(samples.prefix(half)))
+            let recent = Self.median(of: Array(samples.suffix(half)))
             guard older > 0 else { return .flat }
             if Double(recent) >= Double(older) * 1.4 { return .up }
             if Double(recent) <= Double(older) * 0.7 { return .down }
             return .flat
         }()
-
-        self.turnPatterns[provider] = TurnPattern(samples: history, avg: avg, p90: p90, trend: trend)
+        return TurnPattern(samples: samples, avg: avg, p90: p90, trend: trend)
     }
 
     /// Append the current usedPercent for every observed window. Detects
