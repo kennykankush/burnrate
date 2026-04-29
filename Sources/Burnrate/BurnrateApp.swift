@@ -103,7 +103,7 @@ enum InspectClaude {
                 print("  advisor:      health=\(advisor.health.rawValue) → \(advisor.recommendation)")
                 print("                why=\(advisor.primaryDriver) — \(advisor.driverDetail)")
                 print("                forecast=\(advisor.forecast)")
-                print("                lastTurnShare=\(Int(advisor.lastTurnSharePercent))% burn/min=\(advisor.tokensPerMinute)")
+                print("                newCtx=\(DisplayText.contextShare(advisor.lastTurnSharePercent)) burn/min=\(advisor.tokensPerMinute)")
             }
         }
         if let agg = snap.claudeAggregate {

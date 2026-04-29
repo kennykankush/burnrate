@@ -913,15 +913,21 @@ public actor ClaudeUsageWatcher {
         let usedTokens = session.lastInputTokens
             + session.lastCacheReadTokens
             + session.lastCacheCreateTokens
+            + session.lastOutputTokens
         let contextWindow = Self.inferContextWindow(model: session.modelName, observedUsedTokens: usedTokens)
 
         // Per-turn context growth — best signal is what the LAST turn just
-        // added to context (assistant output + user input). Historical average
-        // understates because early turns are small while recent turns are large
-        // (each new turn carries the previous output forward).
+        // added to context. When cache is hit, `lastInputTokens` is exactly the
+        // new prompt. When cache misses, `lastInputTokens` is the full history,
+        // so we cap it to a safe 2k to avoid exploding the average.
         let averageGrowth: Int = {
-            // Recent reality: last assistant output + ~1K user input estimate
-            let lastNewTokens = session.lastOutputTokens + 1_000
+            let lastInput = session.lastInputTokens
+            let lastOutput = session.lastOutputTokens
+            let lastCacheRead = session.lastCacheReadTokens
+
+            let newPromptSize = lastCacheRead > 0 ? lastInput : min(lastInput, 2_000)
+            let lastNewTokens = newPromptSize + lastOutput
+
             if lastNewTokens >= 3_000 {
                 return lastNewTokens
             }
@@ -940,7 +946,7 @@ public actor ClaudeUsageWatcher {
             contextUsedTokens: min(contextWindow, max(0, usedTokens)),
             contextWindowTokens: contextWindow,
             averageGrowthTokens: averageGrowth,
-            nextMessageTokens: session.lastTurnTokens,
+            nextMessageTokens: session.lastInputTokens + session.lastOutputTokens,
             userMessageCount: session.userMessageCount,
             updatedAt: session.lastActivityAt ?? now)
     }
@@ -1006,10 +1012,19 @@ public actor ClaudeUsageWatcher {
         let denominator = max(1, totalInput + cacheRead)
         let cacheShare = Double(cacheRead) / Double(denominator) * 100
         let lastTurnTokens = lastInput + lastOutput
-        let observedUsed = lastInput + lastCacheRead + lastCacheCreate
+        let observedUsed = lastInput + lastCacheRead + lastCacheCreate + lastOutput
         let contextWindow = Self.inferContextWindow(model: modelName, observedUsedTokens: observedUsed)
-        let lastTurnShare = contextWindow > 0
+        let contextUsedShare = contextWindow > 0
             ? Double(observedUsed) / Double(contextWindow) * 100
+            : 0
+        // Per-turn context growth: cache reads replay existing context.
+        // With a cache hit, `lastInput` is the new prompt. Without one,
+        // Claude may report the full prompt history as input, so cap it
+        // to a small human prompt estimate and let output carry the turn.
+        let newPromptSize = lastCacheRead > 0 ? lastInput : min(lastInput, 2_000)
+        let perTurnGrowth = max(2_000, newPromptSize + lastOutput)
+        let lastTurnShare = contextWindow > 0
+            ? Double(perTurnGrowth) / Double(contextWindow) * 100
             : 0
         let idleSeconds = max(0, Int(now.timeIntervalSince(latestDate)))
         let frictionTotal = facets?.totalFriction ?? 0
@@ -1022,11 +1037,11 @@ public actor ClaudeUsageWatcher {
             health = .stuck
             recommendation = "Recap before the next prompt — friction was high."
             riskReason = "The last logged session had \(frictionTotal) friction events."
-        } else if lastTurnShare >= 86 {
+        } else if contextUsedShare >= 86 {
             health = .tight
             recommendation = "Wrap this thread before context fills."
-            riskReason = "Last turn alone is \(Int(lastTurnShare.rounded()))% of the context window."
-        } else if lastTurnShare >= 70 {
+            riskReason = "The context window is \(Int(contextUsedShare.rounded()))% full."
+        } else if contextUsedShare >= 70 || lastTurnShare >= 35 {
             health = .watch
             recommendation = "Keep the next ask focused."
             riskReason = "Pressure is building on the context window."
@@ -1056,14 +1071,9 @@ public actor ClaudeUsageWatcher {
             driver = ("Just started", "\(Self.compact(lastTurnTokens)) tokens last turn")
         }
 
-        // Per-turn context growth: new (non-cached) input + output. Cache
-        // reads don't grow the window — they replay it — so subtracting
-        // `lastCacheRead` gives the actual new tokens added this turn.
-        // Floor at 2K to avoid divide-by-near-zero on tiny one-word replies.
-        let perTurnGrowth = max(2_000, max(0, lastInput - lastCacheRead) + lastOutput)
         let contextRemaining = max(0, contextWindow - observedUsed)
         let forecast: String
-        if lastTurnShare >= 70 {
+        if contextUsedShare >= 70 {
             let turnsLeft = max(1, contextRemaining / perTurnGrowth)
             forecast = "~\(turnsLeft) turn\(turnsLeft == 1 ? "" : "s") at this size"
         } else {
@@ -1071,7 +1081,7 @@ public actor ClaudeUsageWatcher {
         }
 
         let resetPlan: String
-        if lastTurnShare >= 80 {
+        if contextUsedShare >= 80 {
             resetPlan = "Context is the bottleneck — start fresh after this turn."
         } else if frictionTotal >= 3 {
             resetPlan = "Recap goal — last session logged \(frictionTotal) friction events."
@@ -3145,18 +3155,18 @@ public actor ClaudeUsageWatcher {
 
 // MARK: - Pricing (synthetic API equivalents)
 
-enum ClaudePricing {
+public enum ClaudePricing {
     /// Per-million-token rates approximating public Anthropic API pricing.
     /// Prompt cache reads are ~1/10 of input; cache writes vary by tier.
     /// Numbers are intentionally rounded for "what would I pay on API?" math.
-    struct Rates {
-        let input: Double
-        let output: Double
-        let cacheRead: Double
-        let cacheCreate: Double
+    public struct Rates {
+        public let input: Double
+        public let output: Double
+        public let cacheRead: Double
+        public let cacheCreate: Double
     }
 
-    static func rates(for model: String) -> Rates {
+    public static func rates(for model: String) -> Rates {
         let m = model.lowercased()
         if m.contains("opus") {
             return Rates(input: 15.0, output: 75.0, cacheRead: 1.50, cacheCreate: 18.75)
@@ -3168,7 +3178,7 @@ enum ClaudePricing {
         return Rates(input: 3.0, output: 15.0, cacheRead: 0.30, cacheCreate: 3.75)
     }
 
-    static func synthesizeUSD(model: String, input: Int, output: Int, cacheRead: Int, cacheCreate: Int) -> Double {
+    public static func synthesizeUSD(model: String, input: Int, output: Int, cacheRead: Int, cacheCreate: Int) -> Double {
         let r = rates(for: model)
         let mtok = 1_000_000.0
         return Double(input) / mtok * r.input

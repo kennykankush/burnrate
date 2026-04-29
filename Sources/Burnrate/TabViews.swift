@@ -601,8 +601,8 @@ private struct FlatAdvisorContent: View {
 
             HStack(spacing: 14) {
                 FlatMeter(
-                    label: "Last turn",
-                    value: "\(Int(self.lastTurnSharePercent.rounded()))%",
+                    label: "New ctx",
+                    value: DisplayText.contextShare(self.lastTurnSharePercent),
                     percent: self.lastTurnSharePercent,
                     tone: self.tone)
 
@@ -854,12 +854,6 @@ private struct PersonalizedForecast: View {
     private var mediumBucket: Int { max(6_000, self.pattern.avg) }
     private var largeBucket: Int { max(20_000, max(self.pattern.p90, Int(Double(self.pattern.avg) * 2.5))) }
 
-    /// True when the rolling history is too thin for a confident verdict.
-    /// We still show one — even a single sample carries directional info —
-    /// but we tag it with "learning your pace" so the user knows it's
-    /// fragile and will firm up over the next few turns.
-    private var isLearning: Bool { self.pattern.samples.count < 4 }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
@@ -869,11 +863,6 @@ private struct PersonalizedForecast: View {
                 Text(self.verdict.copy)
                     .font(.geist(size: 10, weight: .semibold))
                     .foregroundStyle(self.verdict.color)
-                if self.isLearning {
-                    Text("· learning your pace")
-                        .font(.geist(size: 9))
-                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                }
             }
 
             // Personalized bucket gauge — sizes derived from YOUR pattern

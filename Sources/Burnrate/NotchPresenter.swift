@@ -41,6 +41,10 @@ private func compactTokens(_ tokens: Int) -> String {
     return "\(tokens)"
 }
 
+private func compactShare(_ percent: Double) -> String {
+    DisplayText.contextShare(percent)
+}
+
 // MARK: - Layout preference key
 
 /// SwiftUI preference for measuring the open-state alcove content
@@ -108,30 +112,43 @@ enum NotchTool: String, CaseIterable, Identifiable {
     /// as a ring trio, advisor WHY/WHEN block, and the runway bar.
     /// Compresses the menu bar's NOW tab into a single dense surface.
     case now
-    /// Money & velocity — tokens/min, $/min, last-turn meter,
-    /// 7-day daily rate, cache hit, monthly spend bar.
-    case burn
-    /// Today's session log — plan/project capsule, today's totals
-    /// strip, peak hour, recent fire moment.
-    case today
+    /// Patterns — chronotype, model mix, leaderboards, diagnostics.
+    /// Mirrors the menu bar's Patterns tab.
+    case patterns
+    /// Wrap — aggregate strip, cost over time, last 30d sparkline,
+    /// hero feature cards. Mirrors the menu bar's Wrap tab.
+    case wrap
+    /// Health — system status, today's hourly breakdown, language
+    /// pills, tool histogram. Mirrors the menu bar's Health tab.
+    case health
 
     var id: String { self.rawValue }
 
     var label: String {
         switch self {
         case .now: "NOW"
-        case .burn: "BURN"
-        case .today: "TODAY"
+        case .patterns: "PATTERNS"
+        case .wrap: "WRAP"
+        case .health: "HEALTH"
         }
     }
 
     var symbol: String {
         switch self {
         case .now: "bolt.fill"
-        case .burn: "dollarsign"
-        case .today: "calendar"
+        case .patterns: "square.grid.2x2"
+        case .wrap: "calendar"
+        case .health: "stethoscope"
         }
     }
+}
+
+struct NotchThresholdAlert: Equatable, Identifiable {
+    let id: String
+    let title: String
+    let detail: String
+    let symbol: String
+    let tone: UsageTone
 }
 
 // MARK: - Presenter
@@ -395,6 +412,7 @@ final class NotchDisplayState {
     /// glance at the menu bar and notice things are heating up without
     /// hovering. Nil = nothing painted.
     var ambientCueColor: Color? = nil
+    var thresholdAlert: NotchThresholdAlert? = nil
 
     struct AlcoveWindow: Equatable {
         let label: String       // "5H" / "7D"
@@ -411,6 +429,7 @@ final class NotchDisplayState {
     struct WindowForecastSummary: Equatable {
         let aheadOfPacePercent: Double
         let projectedAtResetPercent: Double?
+        let runsOutAt: Date?
         let runsOutText: String?
     }
 
@@ -529,26 +548,30 @@ final class NotchDisplayState {
             self.projectedMonthSpend = nil
         }
 
-        // Cost section — compute synthetic per-token rate from the
-        // 30-day window (preferred, more accurate) or lifetime
-        // (fallback). Apply to today's tokens for today's estimated
-        // cost. Mirrors the menu bar's `WrapCostStrip`.
+        // Cost section — compute synthetic cost for today's specific input/output
+        // breakdown using the pricing of the currently active model. Falls back
+        // to the most heavily used model in the mix if no session is active.
         if let agg = snapshot?.claudeAggregate {
+            let activeModel = snapshot?.claudeSession?.modelName
+                ?? agg.modelMix.first?.modelName
+                ?? "sonnet"
+
+            if let today = snapshot?.today, today.totalTokens > 0 {
+                self.syntheticCostToday = ClaudePricing.synthesizeUSD(
+                    model: activeModel,
+                    input: today.inputTokens,
+                    output: today.outputTokens,
+                    cacheRead: 0,
+                    cacheCreate: 0
+                )
+            } else {
+                self.syntheticCostToday = nil
+            }
+
             let lifetimeTokens = agg.lifetimeInputTokens
                 + agg.lifetimeOutputTokens
                 + agg.lifetimeCacheReadTokens
                 + agg.lifetimeCacheCreationTokens
-            let rate30d = agg.lastThirtyDayTokens > 0 && agg.lastThirtyDayCostUSD > 0
-                ? agg.lastThirtyDayCostUSD / Double(agg.lastThirtyDayTokens)
-                : 0
-            let rateLifetime = lifetimeTokens > 0 && agg.lifetimeSyntheticCostUSD > 0
-                ? agg.lifetimeSyntheticCostUSD / Double(lifetimeTokens)
-                : 0
-            let rate = rate30d > 0 ? rate30d : rateLifetime
-
-            self.syntheticCostToday = (self.totalTokensToday > 0 && rate > 0)
-                ? Double(self.totalTokensToday) * rate
-                : nil
             self.cost30d = agg.lastThirtyDayCostUSD > 0 ? agg.lastThirtyDayCostUSD : nil
             self.tokens30d = agg.lastThirtyDayTokens
             self.costLifetime = agg.lifetimeSyntheticCostUSD > 0 ? agg.lifetimeSyntheticCostUSD : nil
@@ -685,6 +708,108 @@ final class NotchDisplayState {
         } else {
             self.ambientCueColor = nil
         }
+        self.thresholdAlert = self.computeThresholdAlert()
+    }
+
+    private func computeThresholdAlert(now: Date = Date()) -> NotchThresholdAlert? {
+        if let title = self.depletedTitle {
+            let back = self.depletedCountdown.map { "back in \($0)" }
+                ?? self.depletedClock
+                ?? "reset pending"
+            return NotchThresholdAlert(
+                id: "depleted-\(title)",
+                title: "BURST DEPLETED",
+                detail: back,
+                symbol: "lock.fill",
+                tone: .tight)
+        }
+
+        if let forecast = self.fiveHourForecast,
+           let runsOutAt = forecast.runsOutAt,
+           runsOutAt > now
+        {
+            let minutes = max(1, Int(ceil(runsOutAt.timeIntervalSince(now) / 60)))
+            if minutes <= 15 {
+                let bucket = minutes <= 5 ? 5 : (minutes <= 10 ? 10 : 15)
+                return NotchThresholdAlert(
+                    id: "burst-runout-\(bucket)",
+                    title: "BURST IN \(minutes)m",
+                    detail: "Slow down; 5h cap is projected to hit.",
+                    symbol: "flame.fill",
+                    tone: minutes <= 5 ? .tight : .watch)
+            }
+        }
+
+        if let fiveHour = self.fiveHour {
+            if fiveHour.percent >= 95 {
+                return NotchThresholdAlert(
+                    id: "burst-used-95",
+                    title: "BURST HOT",
+                    detail: "\(Int(fiveHour.percent.rounded()))% used · \(fiveHour.resetText) left",
+                    symbol: "bolt.trianglebadge.exclamationmark.fill",
+                    tone: .tight)
+            }
+            if fiveHour.percent >= 85 {
+                return NotchThresholdAlert(
+                    id: "burst-used-85",
+                    title: "BURST CLIMBING",
+                    detail: "\(Int(fiveHour.percent.rounded()))% used · pace the next turns",
+                    symbol: "speedometer",
+                    tone: .watch)
+            }
+        }
+
+        if self.hasContext {
+            if self.contextPercent >= 86 {
+                return NotchThresholdAlert(
+                    id: "context-86",
+                    title: "CONTEXT TIGHT",
+                    detail: "\(Int(self.contextPercent.rounded()))% used · compact soon",
+                    symbol: "text.badge.exclamationmark",
+                    tone: .tight)
+            }
+            if self.contextPercent >= 75 {
+                return NotchThresholdAlert(
+                    id: "context-75",
+                    title: "CONTEXT HEATING",
+                    detail: "\(Int(self.contextPercent.rounded()))% used · keep the next ask focused",
+                    symbol: "eye.fill",
+                    tone: .watch)
+            }
+        }
+
+        if let weekly = self.weekly, weekly.percent >= 92 {
+            return NotchThresholdAlert(
+                id: "weekly-92",
+                title: "WEEKLY CAP HOT",
+                detail: "\(Int(weekly.percent.rounded()))% used · reset \(weekly.resetText)",
+                symbol: "calendar.badge.exclamationmark",
+                tone: weekly.percent >= 97 ? .tight : .watch)
+        }
+
+        if let projected = self.projectedMonthSpend,
+           let limit = self.spendLimit,
+           limit > 0,
+           projected > limit
+        {
+            return NotchThresholdAlert(
+                id: "spend-projected-over",
+                title: "SPEND CAP TRACKING",
+                detail: "on pace for \(String(format: "$%.0f", projected)) of \(String(format: "$%.0f", limit))",
+                symbol: "dollarsign.circle.fill",
+                tone: .watch)
+        }
+
+        if self.fireActive {
+            return NotchThresholdAlert(
+                id: "fire-\(self.fireTurnTokens)",
+                title: "BIG TURN",
+                detail: "\(compactTokens(self.fireTurnTokens)) tokens · \(Int(self.fireContextPercent.rounded()))% context",
+                symbol: "flame.fill",
+                tone: .tight)
+        }
+
+        return nil
     }
 
     // MARK: - Advisor helper
@@ -756,6 +881,7 @@ final class NotchDisplayState {
         return WindowForecastSummary(
             aheadOfPacePercent: f.aheadOfPacePercent,
             projectedAtResetPercent: f.projectedAtResetPercent,
+            runsOutAt: f.runsOutAt,
             runsOutText: Self.runsOutText(f.runsOutAt))
     }
 
@@ -943,7 +1069,7 @@ private final class NotchPanel: NSPanel {
         )
         self.hasShadow = false
         self.backgroundColor = .clear
-        self.level = .screenSaver
+        self.level = .statusBar
         self.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         self.isMovable = false
     }
@@ -979,6 +1105,9 @@ private struct NotchMorphHost: View {
 
     @State private var isHovering = false
     @State private var hoverIntentTask: Task<Void, Never>?
+    @State private var visibleAlert: NotchThresholdAlert?
+    @State private var lastPresentedAlertID: String?
+    @State private var alertDismissTask: Task<Void, Never>?
     @State private var dragStartWidth: CGFloat?
     @State private var dragStartHeight: CGFloat?
     /// Measured height of the alcove's open-state content (TopRow +
@@ -1020,24 +1149,18 @@ private struct NotchMorphHost: View {
         if self.reduceMotion {
             return .opacity.animation(.linear(duration: 0.05))
         }
-        // Land content alongside the geometry settle, never far behind.
-        // The old formula multiplied totalDuration by spring multipliers
-        // (up to 1.2x), pushing content to ~1s after open on slow +
-        // elastic combos. Cap at 200ms so every choreography feels
-        // responsive — content fades in around the midpoint of the morph
-        // and settles together with it.
-        let delay = min(0.20, self.choreography.totalDuration * 0.35)
+
+        let delay = min(0.12, self.choreography.totalDuration * 0.25)
         return .asymmetric(
-            insertion: .opacity
-                .combined(with: .offset(y: -6))
-                .animation(.spring(duration: 0.22, bounce: 0.05).delay(delay)),
-            // Removal must be faster than the rectangle's spring close
-            // (which front-loads — by ~100ms the silhouette already
-            // reads as a closed notch). Use linear 60ms so content is
-            // gone well before the geometry visually settles, instead
-            // of ghosting over a re-shrunk notch.
+            insertion: .modifier(
+                active: BlurTransitionModifier(isActive: true),
+                identity: BlurTransitionModifier(isActive: false)
+            )
+            .combined(with: .offset(y: -4))
+            .animation(.spring(duration: 0.22, bounce: 0.03).delay(delay)),
             removal: .opacity
-                .animation(.linear(duration: 0.06)))
+                .animation(.easeIn(duration: 0.06))
+        )
     }
 
     var body: some View {
@@ -1062,7 +1185,11 @@ private struct NotchMorphHost: View {
                                 .padding(.horizontal, 24)
                                 .frame(width: self.alcoveWidth, height: self.notchHeight)
 
-                            AlcoveContent(state: self.state, model: self.model, reduceMotion: self.reduceMotion)
+                            AlcoveContent(
+                                state: self.state,
+                                model: self.model,
+                                reduceMotion: self.reduceMotion,
+                                onTriggerDebugAlert: self.presentDebugAlert)
                                 .padding(.horizontal, 32)
                                 .padding(.top, 10)
                                 .padding(.bottom, 18)
@@ -1149,6 +1276,19 @@ private struct NotchMorphHost: View {
                 )
                 .offset(y: self.alcoveHeight + 14)
             }
+
+            if let alert = self.visibleAlert, !self.isHovering, !self.isCalibrating {
+                NotchThresholdToast(alert: alert)
+                    .offset(y: self.notchHeight + 12)
+                    .transition(
+                        .asymmetric(
+                            insertion: .opacity
+                                .combined(with: .scale(scale: 0.96, anchor: .top))
+                                .combined(with: .offset(y: -6)),
+                            removal: .opacity
+                                .combined(with: .offset(y: -4))))
+                    .allowsHitTesting(false)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onPreferenceChange(ContentSizeKey.self) { newHeight in
@@ -1176,6 +1316,10 @@ private struct NotchMorphHost: View {
                 self.alcoveHeight = self.notchHeight
                 self.didInitGeometry = true
             }
+            self.presentThresholdAlertIfNeeded(self.state.thresholdAlert)
+        }
+        .onChange(of: self.state.thresholdAlert?.id) { _, _ in
+            self.presentThresholdAlertIfNeeded(self.state.thresholdAlert)
         }
         .onChange(of: self.isCalibrating) { _, newValue in
             // Entering calibration mode auto-closes the alcove so the
@@ -1196,6 +1340,56 @@ private struct NotchMorphHost: View {
             if !self.isHovering {
                 self.alcoveHeight = newHeight
             }
+        }
+    }
+
+    private func presentThresholdAlertIfNeeded(_ alert: NotchThresholdAlert?) {
+        guard let alert else {
+            self.lastPresentedAlertID = nil
+            self.dismissThresholdAlert()
+            return
+        }
+        guard alert.id != self.lastPresentedAlertID else { return }
+        guard !self.isHovering, !self.isCalibrating else { return }
+        self.showThresholdAlert(alert)
+    }
+
+    private func presentDebugAlert(_ alert: NotchThresholdAlert) {
+        self.lastPresentedAlertID = nil
+        self.closeAlcove()
+        self.alertDismissTask?.cancel()
+        Task { @MainActor in
+            try? await Task.sleep(for: self.reduceMotion ? .milliseconds(60) : .milliseconds(180))
+            if self.isCalibrating { return }
+            self.showThresholdAlert(alert)
+        }
+    }
+
+    private func showThresholdAlert(_ alert: NotchThresholdAlert) {
+        self.lastPresentedAlertID = alert.id
+        self.alertDismissTask?.cancel()
+        let show: Animation = self.reduceMotion
+            ? .linear(duration: 0.05)
+            : .spring(duration: 0.24, bounce: 0.18)
+        withAnimation(show) {
+            self.visibleAlert = alert
+        }
+        HapticGate.perform(.levelChange)
+
+        self.alertDismissTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            if Task.isCancelled { return }
+            self.dismissThresholdAlert()
+        }
+    }
+
+    private func dismissThresholdAlert() {
+        self.alertDismissTask?.cancel()
+        let hide: Animation = self.reduceMotion
+            ? .linear(duration: 0.05)
+            : .easeOut(duration: 0.18)
+        withAnimation(hide) {
+            self.visibleAlert = nil
         }
     }
 
@@ -1244,6 +1438,7 @@ private struct NotchMorphHost: View {
 
     private func openAlcove() {
         if self.isHovering { return }
+        self.dismissThresholdAlert()
         self.isHovering = true
 
         if !self.reduceMotion {
@@ -1283,7 +1478,7 @@ private struct NotchMorphHost: View {
         let wasOpen = self.isHovering
         let exit: Animation = self.reduceMotion
             ? .linear(duration: 0.05)
-            : .spring(duration: 0.22, bounce: 0)
+            : .spring(duration: 0.16, bounce: 0)
         withAnimation(exit) {
             self.isHovering = false
             self.alcoveWidth = self.notchWidth
@@ -1577,15 +1772,14 @@ private struct AlcoveContent: View {
     let state: NotchDisplayState
     let model: MenuBarModel
     let reduceMotion: Bool
-
-    private var isDepleted: Bool { self.state.depletedTitle != nil }
+    let onTriggerDebugAlert: (NotchThresholdAlert) -> Void
 
     var body: some View {
-        if self.isDepleted {
-            DepletedAlcove(state: self.state, reduceMotion: self.reduceMotion)
-        } else {
-            AlcoveShell(state: self.state, model: self.model, reduceMotion: self.reduceMotion)
-        }
+        AlcoveShell(
+            state: self.state,
+            model: self.model,
+            reduceMotion: self.reduceMotion,
+            onTriggerDebugAlert: self.onTriggerDebugAlert)
     }
 }
 
@@ -1599,6 +1793,7 @@ private struct AlcoveShell: View {
     let state: NotchDisplayState
     let model: MenuBarModel
     let reduceMotion: Bool
+    let onTriggerDebugAlert: (NotchThresholdAlert) -> Void
 
     @State private var activeTool: NotchTool = .now
     @State private var hoverTask: Task<Void, Never>?
@@ -1644,7 +1839,9 @@ private struct AlcoveShell: View {
 
             ZStack(alignment: .topLeading) {
                 if self.inDevMode {
-                    DevPanel(model: self.model)
+                    DevPanel(
+                        model: self.model,
+                        onTriggerDebugAlert: self.onTriggerDebugAlert)
                         .transition(self.contentTransition)
                 } else {
                     self.activeToolView()
@@ -1660,10 +1857,14 @@ private struct AlcoveShell: View {
             return .opacity.animation(.linear(duration: 0.05))
         }
         return .asymmetric(
-            insertion: .opacity
-                .combined(with: .offset(y: 4))
-                .animation(.spring(duration: 0.26, bounce: 0.08)),
-            removal: .opacity.animation(.easeIn(duration: 0.10)))
+            insertion: .modifier(
+                active: BlurTransitionModifier(isActive: true),
+                identity: BlurTransitionModifier(isActive: false)
+            )
+            .combined(with: .offset(y: -4))
+            .animation(.spring(duration: 0.22, bounce: 0.03)),
+            removal: .opacity.animation(.easeIn(duration: 0.06))
+        )
     }
 
     @ViewBuilder
@@ -1672,22 +1873,23 @@ private struct AlcoveShell: View {
         case .now:
             NowTool(state: self.state, model: self.model)
                 .id("tool-now")
-        case .burn:
-            BurnTool(state: self.state)
-                .id("tool-burn")
-        case .today:
-            TodayTool(state: self.state)
-                .id("tool-today")
+        case .patterns:
+            PatternsTool(model: self.model)
+                .id("tool-patterns")
+        case .wrap:
+            WrapTool(model: self.model)
+                .id("tool-wrap")
+        case .health:
+            HealthTool(model: self.model)
+                .id("tool-health")
         }
     }
 
     /// Hover-driven tool switching. Intent debounce calibrated so a
     /// normal-speed cursor traversing the strip never trips a switch
-    /// mid-motion — at typical tab widths (~70–90px) and mouse speeds
-    /// (200–400 px/s), the cursor lingers 175–450ms on each tab in
-    /// passing. 220ms catches the deliberate dwell while letting
-    /// drive-through traffic pass cleanly.
-    private static let toolHoverIntent: Duration = .milliseconds(220)
+    /// mid-motion. 150ms catches the deliberate dwell while letting
+    /// drive-through traffic pass cleanly and maintaining responsiveness.
+    private static let toolHoverIntent: Duration = .milliseconds(150)
 
     private func handleToolHover(_ tool: NotchTool, hovering: Bool) {
         // Any movement (enter or exit) resets the pending switch — that's
@@ -1703,7 +1905,7 @@ private struct AlcoveShell: View {
             HapticGate.perform(.alignment)
             let anim: Animation = self.reduceMotion
                 ? .linear(duration: 0.05)
-                : .spring(duration: 0.30, bounce: 0.12)
+                : .spring(duration: 0.18, bounce: 0.04)
             withAnimation(anim) {
                 self.activeTool = tool
             }
@@ -1846,23 +2048,99 @@ private struct NowTool: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            // HERO — always shows STATE (% + verdict + recommendation)
-            // + TRAJECTORY (forecast + turns left). The hero's BACKGROUND
-            // is the heat gradient (mint → amber → coral), clip-filled
-            // to context % width — the runway IS the backdrop. Fire
-            // moments append a banner under it, never replace.
-            VerdictHero(state: self.state, model: self.model)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background {
-                    HeroGradientBackdrop(
-                        percent: self.state.hasContext ? self.state.contextPercent : 0)
+            Group {
+                if let title = self.state.depletedTitle {
+                    // PREMIUM DEPLETED HERO
+                    // Left-aligned massive countdown with a sleek gradient border
+                    // mimicking a high-end "locked" hardware panel.
+                    HStack(alignment: .center, spacing: 16) {
+                        VStack(alignment: .trailing, spacing: 0) {
+                            Text(self.state.depletedCountdown ?? "—")
+                                .font(.geistMono(size: 34, weight: .bold))
+                                .foregroundStyle(NotchPalette.danger)
+                                .contentTransition(.numericText())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.5)
+                        }
+                        .frame(minWidth: 64, alignment: .trailing)
+
+                        Rectangle()
+                            .fill(NotchPalette.danger.opacity(0.2))
+                            .frame(width: 1, height: 38)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 9))
+                                Text("RATE-LIMITED")
+                                    .font(.geist(size: 10, weight: .bold))
+                                    .tracking(1.2)
+                            }
+                            .foregroundStyle(NotchPalette.danger)
+
+                            Text(title)
+                                .font(.geist(size: 15, weight: .semibold))
+                                .foregroundStyle(NotchPalette.primaryText)
+                                .lineLimit(1)
+
+                            if let clockText = self.state.depletedClock {
+                                Text(clockText)
+                                    .font(.geist(size: 11))
+                                    .foregroundStyle(NotchPalette.secondaryText)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 14)
+                    .background {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            NotchPalette.danger.opacity(0.12),
+                                            NotchPalette.danger.opacity(0.02)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            NotchPalette.danger.opacity(0.35),
+                                            NotchPalette.danger.opacity(0.05)
+                                        ],
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    ),
+                                    lineWidth: 1
+                                )
+                        }
+                    }
+                } else {
+                    // HERO — always shows STATE (% + verdict + recommendation)
+                    // + TRAJECTORY (forecast + turns left). The hero's BACKGROUND
+                    // is the heat gradient (mint → amber → coral), clip-filled
+                    // to context % width — the runway IS the backdrop. Fire
+                    // moments append a banner under it, never replace.
+                    VerdictHero(state: self.state, model: self.model)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .background {
+                            HeroGradientBackdrop(
+                                percent: self.state.hasContext ? self.state.contextPercent : 0)
+                        }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.07), lineWidth: 1)
-                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+            }
                 .onHover(perform: self.handleHeroHover)
 
             if self.state.fireActive {
@@ -1877,7 +2155,9 @@ private struct NowTool: View {
             // "N small / M medium / L large asks left" anchored to
             // the user's actual turn-size pattern. Only renders when
             // there's enough data; the block self-gates internally.
-            PersonalizedForecastBlock(model: self.model)
+            if self.state.depletedTitle == nil {
+                PersonalizedForecastBlock(model: self.model)
+            }
 
             // SUPPORTING — windows as compact meter rows. Renders the
             // canonical 5H + Weekly plus any Opus/Sonnet weekly splits
@@ -2267,13 +2547,17 @@ private struct VerdictHero: View {
 
     private var titleText: String {
         if self.state.hasAdvisor { return self.state.advisorHealthTitle }
-        if !self.state.hasContext { return "Cold start" }
+        if !self.state.hasContext {
+            return self.state.depletedTitle != nil ? "Rate limited" : "Cold start"
+        }
         return self.state.verdictTitle
     }
 
     private var subtitleText: String {
         if self.state.hasAdvisor { return self.state.advisorRecommendation }
-        if !self.state.hasContext { return "open Claude Code or Codex to begin" }
+        if !self.state.hasContext {
+            return self.state.depletedTitle != nil ? "waiting for window to reset" : "open Claude Code or Codex to begin"
+        }
         return self.state.verdictDetail
     }
 
@@ -2925,13 +3209,6 @@ private struct PersonalizedForecastBlock: View {
         return max(20_000, max(p90, Int(Double(avg) * 2.5)))
     }
 
-    /// Mirrors the menu bar's `isLearning` — sample count under 4
-    /// means the pattern is fragile and the forecast is directional
-    /// at best. Tagging it keeps the user honest about confidence.
-    private var isLearning: Bool {
-        (self.pattern?.samples.count ?? 0) < 4
-    }
-
     var body: some View {
         if let ctx = self.workContext, let p = self.pattern, let v = self.verdict {
             VStack(alignment: .leading, spacing: 4) {
@@ -2945,12 +3222,6 @@ private struct PersonalizedForecastBlock: View {
                         .foregroundStyle(NotchPalette.tone(v.tone))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    if self.isLearning {
-                        Text("· learning your pace")
-                            .font(.geist(size: 9))
-                            .foregroundStyle(NotchPalette.tertiaryText)
-                            .lineLimit(1)
-                    }
                     Spacer(minLength: 0)
                 }
 
@@ -3870,6 +4141,71 @@ private struct BurnTool: View {
     }
 }
 
+// MARK: - PATTERNS / WRAP / HEALTH tools
+//
+// These three reuse the menu bar's tab views directly so the alcove
+// stays in feature parity with the menu bar without a duplicate
+// implementation. Each is wrapped in a fixed-height frame so the
+// inner ScrollView scrolls within the alcove drawer instead of
+// overflowing past the maxDrawerHeight cap.
+//
+// The horizontal padding is negated (-16) because the menu bar views
+// add their own contentPadding while AlcoveContent already pads 32pt
+// — without the negation we'd lose ~32pt of inner width to nothing.
+
+/// Drawer height the inner ScrollView is constrained to. Sits below
+/// `NotchMorphHost.maxDrawerHeight` (420) by enough to leave room for
+/// the alcove's tool strip and outer paddings.
+private let alcoveScrollableHeight: CGFloat = 320
+
+/// Wrap a menu-bar tab view so it fits inside the alcove drawer:
+/// fixed height + edge negation so it occupies the full inner width.
+private struct AlcoveTabHost<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        self.content()
+            .padding(.horizontal, -16)
+            .frame(height: alcoveScrollableHeight)
+    }
+}
+
+private struct PatternsTool: View {
+    let model: MenuBarModel
+
+    var body: some View {
+        if let snapshot = self.model.selectedSnapshot {
+            AlcoveTabHost { PatternsView(snapshot: snapshot) }
+        } else {
+            EmptyTool(message: "No patterns yet — open Claude Code or Codex")
+        }
+    }
+}
+
+private struct WrapTool: View {
+    let model: MenuBarModel
+
+    var body: some View {
+        if let snapshot = self.model.selectedSnapshot {
+            AlcoveTabHost { WrapView(snapshot: snapshot) }
+        } else {
+            EmptyTool(message: "No wrap yet — use it for a few days")
+        }
+    }
+}
+
+private struct HealthTool: View {
+    let model: MenuBarModel
+
+    var body: some View {
+        if let snapshot = self.model.selectedSnapshot {
+            AlcoveTabHost { HealthView(snapshot: snapshot) }
+        } else {
+            EmptyTool(message: "No health data — waiting for your first session")
+        }
+    }
+}
+
 /// Section header used inside BURN to introduce TODAY / MONTH zones.
 /// Tracking-spaced label on the left, hairline filling the rest.
 private struct BurnSectionDivider: View {
@@ -3998,7 +4334,7 @@ private struct BurnRow: View {
     }
 }
 
-/// Compact meter showing the last user turn's share of the session.
+/// Compact meter showing the last user turn's new-context share.
 /// Mirrors the menu bar Stamina section's `FlatMeter` for "Last turn"
 /// — gives instant feedback on whether the most recent turn was a
 /// nibble or a chunk. Tone shifts red when a single turn dominates.
@@ -4014,12 +4350,12 @@ private struct LastTurnMeter: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text("LAST TURN")
+                Text("NEW CTX")
                     .font(.geist(size: 8, weight: .bold))
                     .foregroundStyle(NotchPalette.tertiaryText)
                     .tracking(1.2)
                 Spacer()
-                Text("\(Int(self.percent.rounded()))% of session")
+                Text("\(compactShare(self.percent)) of window")
                     .font(.geistMono(size: 9))
                     .foregroundStyle(NotchPalette.secondaryText)
                     .contentTransition(.numericText())
@@ -4111,6 +4447,55 @@ private struct FireBanner: View {
     }
 }
 
+private struct NotchThresholdToast: View {
+    let alert: NotchThresholdAlert
+
+    private var tint: Color {
+        NotchPalette.tone(self.alert.tone)
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            ZStack {
+                Circle()
+                    .fill(self.tint.opacity(0.18))
+                Image(systemName: self.alert.symbol)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(self.tint)
+            }
+            .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(self.alert.title)
+                    .font(.geist(size: 10, weight: .bold))
+                    .tracking(1.0)
+                    .foregroundStyle(NotchPalette.primaryText)
+                    .lineLimit(1)
+                Text(self.alert.detail)
+                    .font(.geist(size: 10, weight: .medium))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 11)
+        .padding(.vertical, 7)
+        .frame(width: 310, alignment: .leading)
+        .background {
+            Capsule()
+                .fill(Color.black.opacity(0.92))
+                .overlay {
+                    Capsule()
+                        .stroke(self.tint.opacity(0.42), lineWidth: 1)
+                }
+        }
+        .shadow(color: Color.black.opacity(0.35), radius: 18, y: 8)
+    }
+}
+
 // MARK: - Empty tool placeholder
 
 private struct EmptyTool: View {
@@ -4129,69 +4514,162 @@ private struct EmptyTool: View {
     }
 }
 
-// MARK: - Depleted alcove
-
-private struct DepletedAlcove: View {
-    let state: NotchDisplayState
-    let reduceMotion: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(NotchPalette.danger)
-                    .symbolEffect(.pulse, options: .repeating, isActive: !self.reduceMotion)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("RATE-LIMITED")
-                        .font(.geist(size: 9, weight: .bold))
-                        .foregroundStyle(NotchPalette.danger)
-                        .tracking(1.4)
-                    Text(self.state.depletedTitle ?? "depleted")
-                        .font(.geist(size: 11, weight: .semibold))
-                        .foregroundStyle(NotchPalette.primaryText)
-                }
-                Spacer()
-                Text(self.state.projectLabel)
-                    .font(.geist(size: 10))
-                    .foregroundStyle(NotchPalette.tertiaryText)
-                    .lineLimit(1)
-            }
-
-            VStack(spacing: 2) {
-                Text(self.state.depletedCountdown ?? "—")
-                    .font(.geistMono(size: 38, weight: .semibold))
-                    .foregroundStyle(NotchPalette.primaryText)
-                    .contentTransition(.numericText())
-                Text(self.state.depletedClock ?? "")
-                    .font(.geist(size: 10))
-                    .foregroundStyle(NotchPalette.tertiaryText)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
-            .background {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(NotchPalette.danger.opacity(0.08))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(NotchPalette.danger.opacity(0.25), lineWidth: 1)
-                    }
-            }
-        }
-    }
-}
-
 // MARK: - Dev panel (choreography + spring pickers, hidden behind wrench)
 
 private struct DevPanel: View {
     let model: MenuBarModel
+    let onTriggerDebugAlert: (NotchThresholdAlert) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            ToastDebugSection(onTrigger: self.onTriggerDebugAlert)
             CalibrationSection(model: self.model)
             HapticToggleSection(model: self.model)
             ExpandStylePicker(model: self.model)
         }
+    }
+}
+
+private struct ToastDebugSection: View {
+    let onTrigger: (NotchThresholdAlert) -> Void
+    @State private var cycleIndex = 0
+
+    private static let fixtures: [NotchThresholdAlert] = [
+        NotchThresholdAlert(
+            id: "debug-burst-5",
+            title: "BURST IN 5m",
+            detail: "Slow down; 5h cap is projected to hit.",
+            symbol: "flame.fill",
+            tone: .tight),
+        NotchThresholdAlert(
+            id: "debug-burst-15",
+            title: "BURST IN 15m",
+            detail: "Projection says the burst window is closing.",
+            symbol: "speedometer",
+            tone: .watch),
+        NotchThresholdAlert(
+            id: "debug-burst-hot",
+            title: "BURST HOT",
+            detail: "95% used · final turns only",
+            symbol: "bolt.trianglebadge.exclamationmark.fill",
+            tone: .tight),
+        NotchThresholdAlert(
+            id: "debug-context-75",
+            title: "CONTEXT HEATING",
+            detail: "75% used · keep the next ask focused",
+            symbol: "eye.fill",
+            tone: .watch),
+        NotchThresholdAlert(
+            id: "debug-context-86",
+            title: "CONTEXT TIGHT",
+            detail: "86% used · compact soon",
+            symbol: "text.badge.exclamationmark",
+            tone: .tight),
+        NotchThresholdAlert(
+            id: "debug-weekly",
+            title: "WEEKLY CAP HOT",
+            detail: "93% used · reset in 2d",
+            symbol: "calendar.badge.exclamationmark",
+            tone: .watch),
+        NotchThresholdAlert(
+            id: "debug-spend",
+            title: "SPEND CAP TRACKING",
+            detail: "on pace for $118 of $100",
+            symbol: "dollarsign.circle.fill",
+            tone: .watch),
+        NotchThresholdAlert(
+            id: "debug-big-turn",
+            title: "BIG TURN",
+            detail: "42K tokens · 78% context",
+            symbol: "flame.fill",
+            tone: .tight),
+        NotchThresholdAlert(
+            id: "debug-depleted",
+            title: "BURST DEPLETED",
+            detail: "back in 18m",
+            symbol: "lock.fill",
+            tone: .tight),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 6) {
+                Text("TOAST LAB")
+                    .font(.geist(size: 8, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.2)
+                Spacer()
+                Button(action: self.triggerNext) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8, weight: .bold))
+                        Text("CYCLE")
+                            .font(.geistMono(size: 9, weight: .bold))
+                    }
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(NotchPalette.accent))
+                }
+                .buttonStyle(.plain)
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.adaptive(minimum: 82, maximum: 112), spacing: 6)
+                ],
+                alignment: .leading,
+                spacing: 6)
+            {
+                ForEach(Self.fixtures) { alert in
+                    Button(action: { self.onTrigger(self.unique(alert)) }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: alert.symbol)
+                                .font(.system(size: 8, weight: .bold))
+                            Text(self.shortLabel(for: alert))
+                                .font(.geistMono(size: 8, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(NotchPalette.tone(alert.tone))
+                        .frame(maxWidth: .infinity, minHeight: 22)
+                        .padding(.horizontal, 6)
+                        .background {
+                            Capsule()
+                                .fill(Color.white.opacity(0.035))
+                                .overlay {
+                                    Capsule()
+                                        .stroke(NotchPalette.tone(alert.tone).opacity(0.25), lineWidth: 1)
+                                }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func triggerNext() {
+        guard !Self.fixtures.isEmpty else { return }
+        let alert = Self.fixtures[self.cycleIndex % Self.fixtures.count]
+        self.cycleIndex += 1
+        self.onTrigger(self.unique(alert))
+    }
+
+    private func unique(_ alert: NotchThresholdAlert) -> NotchThresholdAlert {
+        NotchThresholdAlert(
+            id: "\(alert.id)-\(UUID().uuidString)",
+            title: alert.title,
+            detail: alert.detail,
+            symbol: alert.symbol,
+            tone: alert.tone)
+    }
+
+    private func shortLabel(for alert: NotchThresholdAlert) -> String {
+        alert.title
+            .replacingOccurrences(of: "CONTEXT ", with: "CTX ")
+            .replacingOccurrences(of: "WEEKLY CAP ", with: "WEEKLY ")
+            .replacingOccurrences(of: "SPEND CAP ", with: "SPEND ")
+            .replacingOccurrences(of: "BURST DEPLETED", with: "DEPLETED")
     }
 }
 
@@ -4312,6 +4790,19 @@ private struct CalibrationSection: View {
                 .font(.geist(size: 9))
                 .foregroundStyle(NotchPalette.tertiaryText)
         }
+    }
+}
+
+// MARK: - Animations & Transitions
+
+struct BlurTransitionModifier: ViewModifier {
+    let isActive: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(isActive ? 0 : 1)
+            .blur(radius: isActive ? 4 : 0)
+            .scaleEffect(isActive ? 0.98 : 1)
     }
 }
 

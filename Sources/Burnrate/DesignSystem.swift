@@ -238,6 +238,19 @@ enum DisplayText {
         }
     }
 
+    static func contextShare(_ percent: Double) -> String {
+        let value = max(0, percent)
+        if value == 0 { return "0%" }
+        if value < 1 { return "<1%" }
+        if value < 10 {
+            let raw = String(format: "%.1f", value)
+            return raw.hasSuffix(".0")
+                ? "\(Int(value.rounded()))%"
+                : "\(raw)%"
+        }
+        return "\(Int(value.rounded()))%"
+    }
+
     static func minutes(_ value: Int) -> String {
         if value < 60 { return "\(value)m" }
         let hours = value / 60

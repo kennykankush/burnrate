@@ -14,82 +14,41 @@ struct ClaudeContentStack: View {
     var body: some View {
         VStack(spacing: 14) {
             if let session = snapshot.claudeSession {
-                ClaudeComponentLabel(id: "A", name: "Task ribbon", kind: "ClaudeTaskRibbon")
                 ClaudeTaskRibbon(session: session)
             }
 
             if let advisor = snapshot.claudeSession?.advisor {
-                ClaudeComponentLabel(id: "B", name: "Advisor card", kind: "ClaudeAdvisorCard")
                 ClaudeAdvisorCard(advisor: advisor, session: snapshot.claudeSession)
             }
 
             if let context = snapshot.workContext {
-                ClaudeComponentLabel(id: "C", name: "Context card", kind: "ClaudeContextCard")
                 ClaudeContextCard(context: context)
             }
 
             if let breakdown = snapshot.claudeTodayBreakdown {
-                ClaudeComponentLabel(id: "D", name: "Today rich card", kind: "ClaudeTodayRichCard")
                 ClaudeTodayRichCard(today: snapshot.today, breakdown: breakdown)
             }
 
             if let aggregate = snapshot.claudeAggregate {
-                ClaudeComponentLabel(id: "E", name: "Aggregate stats", kind: "ClaudeAggregateCard")
                 ClaudeAggregateCard(aggregate: aggregate)
 
                 if !aggregate.recentDayTokens.isEmpty {
-                    ClaudeComponentLabel(id: "F", name: "30-day sparkline", kind: "ClaudeSparklineCard")
                     ClaudeSparklineCard(aggregate: aggregate)
                 }
             }
 
             if let session = snapshot.claudeSession, !session.toolHistogram.isEmpty {
-                ClaudeComponentLabel(id: "G", name: "Tool histogram (this session)", kind: "ClaudeToolHistogramCard")
                 ClaudeToolHistogramCard(session: session)
             }
 
             if !snapshot.healthIndicators.isEmpty {
-                ClaudeComponentLabel(id: "H", name: "Health row", kind: "ClaudeHealthRow")
                 ClaudeHealthRow(indicators: snapshot.healthIndicators)
             }
 
             if !snapshot.patternCards.isEmpty {
-                ClaudeComponentLabel(
-                    id: "P",
-                    name: "Patterns (\(snapshot.patternCards.count) cards)",
-                    kind: "ClaudePatternsDeck — flattened")
                 ClaudePatternsCatalogue(cards: snapshot.patternCards)
             }
         }
-    }
-}
-
-// MARK: - Component label (catalogue mode)
-
-struct ClaudeComponentLabel: View {
-    let id: String
-    let name: String
-    let kind: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Text(self.id)
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(DesignSystem.Colors.accent(for: .claude).opacity(0.18), in: RoundedRectangle(cornerRadius: 4))
-            Text(self.name)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(DesignSystem.Colors.primaryText)
-            Text(self.kind)
-                .font(.system(size: 9, weight: .regular, design: .monospaced))
-                .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer()
-        }
-        .padding(.top, 4)
     }
 }
 
@@ -100,27 +59,10 @@ struct ClaudePatternsCatalogue: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            ForEach(Array(cards.enumerated()), id: \.element.id) { index, card in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Text("P\(String(format: "%02d", index + 1))")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundStyle(DesignSystem.Colors.primaryText)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(self.toneColor(card.tone).opacity(0.20), in: RoundedRectangle(cornerRadius: 4))
-                        Text(card.kind.rawValue)
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
-                        Spacer()
-                        Text(card.tone.rawValue)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(self.toneColor(card.tone))
-                    }
-                    ClaudePatternCardView(card: card)
-                }
-                .padding(8)
-                .glassSurface(cornerRadius: 7, tint: .white.opacity(0.025))
+            ForEach(cards) { card in
+                ClaudePatternCardView(card: card)
+                    .padding(12)
+                    .premiumCard(accent: self.toneColor(card.tone), includeGlow: false)
             }
         }
     }
@@ -477,8 +419,8 @@ struct ClaudeAdvisorCard: View {
 
             HStack(spacing: 6) {
                 ClaudeMeterMetric(
-                    title: "Last turn",
-                    value: "\(Int(self.advisor.lastTurnSharePercent.rounded()))%",
+                    title: "New ctx",
+                    value: DisplayText.contextShare(self.advisor.lastTurnSharePercent),
                     percent: self.advisor.lastTurnSharePercent,
                     tone: self.tone)
                 if let usd = self.advisor.usdPerMinute, usd > 0 {
