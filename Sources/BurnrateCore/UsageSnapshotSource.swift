@@ -22,7 +22,17 @@ public actor UsageSnapshotSource {
 
     private static func sampleCodex(now: Date) -> ProviderUsageSnapshot {
         let local = CodexSessionWatcher().latestSnapshot()
-        return local?.providerSnapshot(accountLabel: "Local Codex", now: now) ?? ProviderUsageSnapshot(
+        let liveSessions = CodexSessionWatcher().liveSessions(now: now)
+        let surface = CodexSurfaceScanner().scan(
+            now: now,
+            localSnapshot: local,
+            liveSessions: liveSessions)
+        return local?.providerSnapshot(
+            accountLabel: "Local Codex",
+            now: now,
+            liveSessions: liveSessions,
+            surface: surface
+        ) ?? ProviderUsageSnapshot(
             kind: .codex,
             planName: "Plus",
             accountLabel: "Local account",
@@ -51,6 +61,7 @@ public actor UsageSnapshotSource {
             ],
             workContext: nil,
             codexSession: nil,
+            codexSurface: surface,
             creditBalance: 18.4,
             extraSpend: nil,
             streakDays: 12,
@@ -99,11 +110,16 @@ private struct CodexUsageFetcher {
         let watcher = CodexSessionWatcher()
         let local = watcher.latestSnapshot()
         let liveSessions = watcher.liveSessions(now: now)
+        let surface = CodexSurfaceScanner().scan(
+            now: now,
+            localSnapshot: local,
+            liveSessions: liveSessions)
         if let local {
             return local.providerSnapshot(
                 accountLabel: "Local Codex",
                 now: now,
-                liveSessions: liveSessions)
+                liveSessions: liveSessions,
+                surface: surface)
         }
 
         let payload = try? await Self.remoteUsagePayload()
@@ -124,6 +140,7 @@ private struct CodexUsageFetcher {
             modelMix: [],
             workContext: nil,
             codexSession: nil,
+            codexSurface: surface,
             creditBalance: creditBalance,
             extraSpend: nil,
             streakDays: 0,
@@ -374,6 +391,7 @@ private struct CodexSessionWatcher {
         // sizes (~100K–1M), not per-turn deltas (~5–20K), and mixing
         // units made `estimatedMessagesRemaining` nonsensical.
         let averageGrowth = Self.averagePositiveGrowth(tokenSamples.map(\.used))
+        let lastContextDelta = Self.lastPositiveGrowth(tokenSamples.map(\.used))
         let activeMinutes = Self.minutes(from: firstDate, to: latestDate)
         let project = directory.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Codex"
         let curatedFlightEvents = Self.curatedFlightEvents(flightEvents)
@@ -404,6 +422,7 @@ private struct CodexSessionWatcher {
             shellCommands: shellCommands,
             webSearches: webSearches,
             biggestBurn: biggestBurnEvent,
+            lastContextDelta: lastContextDelta,
             activeMinutes: activeMinutes,
             latestDate: latestDate)
 
@@ -476,6 +495,7 @@ private struct CodexSessionWatcher {
         shellCommands: Int,
         webSearches: Int,
         biggestBurn: CodexFlightEvent?,
+        lastContextDelta: Int?,
         activeMinutes: Int,
         latestDate: Date) -> CodexSessionInsight
     {
@@ -483,8 +503,9 @@ private struct CodexSessionWatcher {
         let messagesRemaining = context.estimatedMessagesRemaining
         let idleSeconds = max(0, Int(Date().timeIntervalSince(latestDate)))
         let lastTurnTokens = latest.input + latest.output
+        let newContextTokens = lastContextDelta ?? 0
         let lastTurnShare = context.contextWindowTokens > 0
-            ? Double(lastTurnTokens) / Double(context.contextWindowTokens) * 100
+            ? Double(newContextTokens) / Double(context.contextWindowTokens) * 100
             : 0
         let tokensPerMinute = activeMinutes > 0
             ? max(0, (totalInput + totalOutput) / activeMinutes)
@@ -700,6 +721,14 @@ private struct CodexSessionWatcher {
         return deltas.reduce(0, +) / deltas.count
     }
 
+    private static func lastPositiveGrowth(_ values: [Int]) -> Int? {
+        guard let previous = values.dropLast().last,
+              let latest = values.last
+        else { return nil }
+        let delta = latest - previous
+        return delta > 0 ? delta : nil
+    }
+
     private static func average(_ values: [Int]) -> Int? {
         guard !values.isEmpty else { return nil }
         return values.reduce(0, +) / values.count
@@ -784,7 +813,12 @@ private struct CodexLocalSnapshot {
     let today: DailyUsageStats
     let modelMix: [ModelUsageShare]
 
-    func providerSnapshot(accountLabel: String, now: Date, liveSessions: [LiveSession] = []) -> ProviderUsageSnapshot {
+    func providerSnapshot(
+        accountLabel: String,
+        now: Date,
+        liveSessions: [LiveSession] = [],
+        surface: CodexSurfaceSnapshot? = nil) -> ProviderUsageSnapshot
+    {
         ProviderUsageSnapshot(
             kind: .codex,
             planName: self.planName,
@@ -796,11 +830,570 @@ private struct CodexLocalSnapshot {
             workContext: self.context,
             codexSession: self.codexSession,
             codexMemory: self.memory,
+            codexSurface: surface,
             creditBalance: self.creditBalance,
             extraSpend: nil,
             streakDays: 0,
             liveSessions: liveSessions,
             updatedAt: now)
+    }
+}
+
+private struct CodexSurfaceScanner {
+    private let fileManager = FileManager.default
+
+    func scan(
+        now: Date,
+        localSnapshot: CodexLocalSnapshot?,
+        liveSessions: [LiveSession]) -> CodexSurfaceSnapshot
+    {
+        let home = self.fileManager.homeDirectoryForCurrentUser
+        let root = home.appendingPathComponent(".codex")
+        let auth = root.appendingPathComponent("auth.json")
+        let sessions = root.appendingPathComponent("sessions")
+        let stateDB = root.appendingPathComponent("state_5.sqlite")
+        let config = root.appendingPathComponent("config.toml")
+        let skills = root.appendingPathComponent("skills")
+        let plugins = root.appendingPathComponent("plugins")
+        let logs = root.appendingPathComponent("logs")
+
+        let hasRoot = self.exists(root)
+        let hasAuth = self.exists(auth)
+        let rolloutFiles = self.countFiles(in: sessions, pathExtension: "jsonl")
+        let stateStats = self.stateStats(from: stateDB)
+        let rolloutEventMix = self.rolloutEventMix(from: sessions)
+        let automation = self.automationStats(from: stateDB)
+        let hasStateDB = self.exists(stateDB)
+        let hasConfig = self.exists(config)
+        let skillCount = self.countDirectories(in: skills)
+        let pluginCount = max(
+            self.countDirectories(in: plugins),
+            self.countDirectories(in: plugins.appendingPathComponent("cache")))
+        let hasLogs = self.exists(logs)
+        let projectCount = max(
+            stateStats?.projectCount ?? 0,
+            localSnapshot?.projectLabel == nil ? 0 : 1)
+        let windowsSeen = localSnapshot?.windows.count ?? 0
+
+        let sources: [CodexSurfaceArea] = [
+            CodexSurfaceArea(
+                key: .root,
+                title: "Codex home",
+                detail: hasRoot ? "Local Codex directory is readable." : "No local Codex directory found yet.",
+                pathHint: self.tildePath(root, home: home),
+                status: hasRoot ? .active : .missing,
+                depth: .visible,
+                count: nil,
+                sensitivity: "directory names only"),
+            CodexSurfaceArea(
+                key: .liveSessions,
+                title: "Live sessions",
+                detail: liveSessions.isEmpty
+                    ? "No rollout touched in the last 10 minutes."
+                    : "\(liveSessions.count) rollout\(liveSessions.count == 1 ? "" : "s") active right now.",
+                pathHint: self.tildePath(sessions, home: home),
+                status: liveSessions.isEmpty ? .available : .active,
+                depth: .visible,
+                count: liveSessions.count,
+                sensitivity: "project labels and mtimes"),
+            CodexSurfaceArea(
+                key: .quota,
+                title: "Quota windows",
+                detail: windowsSeen > 0
+                    ? "\(windowsSeen) rate-limit window\(windowsSeen == 1 ? "" : "s") decoded from local token counts."
+                    : (hasAuth ? "Auth is present; remote quota can still be queried." : "Needs auth or token_count events."),
+                pathHint: nil,
+                status: windowsSeen > 0 ? .active : (hasAuth ? .available : .missing),
+                depth: .visible,
+                count: windowsSeen > 0 ? windowsSeen : nil,
+                sensitivity: "usage percentages"),
+            CodexSurfaceArea(
+                key: .sessions,
+                title: "Rollout JSONL",
+                detail: rolloutFiles > 0
+                    ? "\(rolloutFiles) session file\(rolloutFiles == 1 ? "" : "s") available for token/tool timelines."
+                    : "No session rollouts found.",
+                pathHint: self.tildePath(sessions, home: home),
+                status: rolloutFiles > 0 ? .active : .missing,
+                depth: .shallow,
+                count: rolloutFiles,
+                sensitivity: "conversation and tool event metadata"),
+            CodexSurfaceArea(
+                key: .stateDB,
+                title: "State database",
+                detail: self.stateDetail(stats: stateStats, hasDB: hasStateDB),
+                pathHint: self.tildePath(stateDB, home: home),
+                status: self.stateStatus(stats: stateStats, hasDB: hasStateDB),
+                depth: .deep,
+                count: stateStats?.threadCount,
+                sensitivity: "thread titles, cwd, branch, model"),
+            CodexSurfaceArea(
+                key: .auth,
+                title: "Auth token",
+                detail: hasAuth
+                    ? "Auth file exists; token value is never displayed."
+                    : "No auth.json available for remote quota/account probes.",
+                pathHint: self.tildePath(auth, home: home),
+                status: hasAuth ? .available : .missing,
+                depth: .deep,
+                count: nil,
+                sensitivity: "secret-bearing file, redacted"),
+            CodexSurfaceArea(
+                key: .config,
+                title: "Config",
+                detail: hasConfig
+                    ? "Codex config is present for sandbox, model, and MCP hints."
+                    : "No config.toml found.",
+                pathHint: self.tildePath(config, home: home),
+                status: hasConfig ? .available : .missing,
+                depth: .deep,
+                count: nil,
+                sensitivity: "settings metadata"),
+            CodexSurfaceArea(
+                key: .skills,
+                title: "Skills",
+                detail: skillCount > 0
+                    ? "\(skillCount) installed skill director\(skillCount == 1 ? "y" : "ies") detected."
+                    : "No Codex skill directory detected.",
+                pathHint: self.tildePath(skills, home: home),
+                status: skillCount > 0 ? .active : .missing,
+                depth: .abyss,
+                count: skillCount,
+                sensitivity: "skill names only"),
+            CodexSurfaceArea(
+                key: .plugins,
+                title: "Plugins",
+                detail: pluginCount > 0
+                    ? "\(pluginCount) plugin/cache director\(pluginCount == 1 ? "y" : "ies") detected."
+                    : "No plugin cache detected.",
+                pathHint: self.tildePath(plugins, home: home),
+                status: pluginCount > 0 ? .active : .missing,
+                depth: .abyss,
+                count: pluginCount,
+                sensitivity: "plugin names only"),
+            CodexSurfaceArea(
+                key: .logs,
+                title: "Logs",
+                detail: hasLogs
+                    ? "Log directory exists for deeper diagnostics."
+                    : "No Codex log directory found.",
+                pathHint: self.tildePath(logs, home: home),
+                status: hasLogs ? .available : .missing,
+                depth: .abyss,
+                count: nil,
+                sensitivity: "diagnostic metadata"),
+            CodexSurfaceArea(
+                key: .projectMemory,
+                title: "Burnrate memory",
+                detail: localSnapshot?.memory.map {
+                    "\($0.sessionCount) session\($0.sessionCount == 1 ? "" : "s") remembered for this project."
+                } ?? "Project memory starts after the first local Codex snapshot.",
+                pathHint: "~/Library/Application Support/burnrate/codex-history.json",
+                status: localSnapshot?.memory == nil ? .available : .active,
+                depth: .abyss,
+                count: localSnapshot?.memory?.sessionCount,
+                sensitivity: "aggregated session totals"),
+        ]
+
+        return CodexSurfaceSnapshot(
+            rootPath: self.tildePath(root, home: home),
+            capturedAt: now,
+            sources: sources,
+            iceberg: Self.layers,
+            sessionsSeen: rolloutFiles,
+            liveSessionsSeen: liveSessions.count,
+            projectsSeen: projectCount,
+            stateThreadsSeen: stateStats?.threadCount ?? 0,
+            rolloutFilesSeen: rolloutFiles,
+            totalThreadTokens: stateStats?.totalTokens ?? 0,
+            archivedThreadsSeen: stateStats?.archivedThreadCount ?? 0,
+            firstThreadAt: stateStats?.firstThreadAt,
+            lastThreadAt: stateStats?.lastThreadAt,
+            modelFacets: stateStats?.models ?? [],
+            reasoningFacets: stateStats?.reasoningEfforts ?? [],
+            approvalFacets: stateStats?.approvalModes ?? [],
+            sandboxFacets: stateStats?.sandboxPolicies ?? [],
+            topProjects: stateStats?.topProjects ?? [],
+            recentThreads: stateStats?.recentThreads ?? [],
+            activityDays: stateStats?.activityDays ?? [],
+            rolloutEventMix: rolloutEventMix,
+            automation: automation)
+    }
+
+    private static let layers: [CodexSurfaceLayer] = [
+        CodexSurfaceLayer(
+            depth: .visible,
+            title: "Visible",
+            detail: "What the notch can safely show at a glance: live project, quota pressure, and session state.",
+            sourceKeys: [.root, .liveSessions, .quota]),
+        CodexSurfaceLayer(
+            depth: .shallow,
+            title: "Shallow",
+            detail: "Rollout files expose token counts, tools, edits, searches, errors, and compactions.",
+            sourceKeys: [.sessions]),
+        CodexSurfaceLayer(
+            depth: .deep,
+            title: "Deep",
+            detail: "State DB, auth, and config connect usage to thread identity, account windows, model, branch, sandbox, and MCP context.",
+            sourceKeys: [.stateDB, .auth, .config]),
+        CodexSurfaceLayer(
+            depth: .abyss,
+            title: "Abyss",
+            detail: "Skills, plugins, logs, and Burnrate's own history let the app infer durable work patterns without reading secrets.",
+            sourceKeys: [.skills, .plugins, .logs, .projectMemory]),
+    ]
+
+    private func stateStatus(stats: StateStats?, hasDB: Bool) -> CodexSurfaceStatus {
+        if let stats, stats.threadCount > 0 { return .active }
+        return hasDB ? .warning : .missing
+    }
+
+    private func stateDetail(stats: StateStats?, hasDB: Bool) -> String {
+        guard hasDB else { return "No state_5.sqlite database found." }
+        guard let stats else { return "Database exists, but thread metadata could not be decoded." }
+        if stats.threadCount == 0 { return "Database exists, but no threads are recorded yet." }
+        let projectText = stats.projectCount == 1 ? "1 project" : "\(stats.projectCount) projects"
+        return "\(stats.threadCount) thread\(stats.threadCount == 1 ? "" : "s") across \(projectText)."
+    }
+
+    private func stateStats(from db: URL) -> StateStats? {
+        guard self.exists(db) else { return nil }
+        let query = """
+        select
+            count(*),
+            count(distinct cwd),
+            coalesce(sum(tokens_used), 0),
+            coalesce(sum(case when archived != 0 then 1 else 0 end), 0),
+            coalesce(min(created_at_ms), min(created_at * 1000)),
+            coalesce(max(updated_at_ms), max(updated_at * 1000))
+        from threads
+        """
+
+        guard let fields = self.sqliteRows(db, query: query).first,
+              fields.count >= 6
+        else { return nil }
+        return StateStats(
+            threadCount: Int(fields[0]) ?? 0,
+            projectCount: Int(fields[1]) ?? 0,
+            totalTokens: Int(fields[2]) ?? 0,
+            archivedThreadCount: Int(fields[3]) ?? 0,
+            firstThreadAt: Self.date(fromMilliseconds: fields[4]),
+            lastThreadAt: Self.date(fromMilliseconds: fields[5]),
+            models: self.facets(from: db, expression: "coalesce(nullif(model, ''), nullif(model_provider, ''), 'unknown')"),
+            reasoningEfforts: self.facets(from: db, expression: "coalesce(nullif(reasoning_effort, ''), 'default')"),
+            approvalModes: self.facets(from: db, expression: "coalesce(nullif(approval_mode, ''), 'unknown')"),
+            sandboxPolicies: self.facets(
+                from: db,
+                expression: "coalesce(nullif(sandbox_policy, ''), 'unknown')",
+                labelMap: Self.sandboxLabel(from:)),
+            topProjects: self.topProjects(from: db),
+            recentThreads: self.recentThreads(from: db),
+            activityDays: self.activityDays(from: db))
+    }
+
+    private func facets(
+        from db: URL,
+        expression: String,
+        limit: Int = 6,
+        labelMap: (String) -> String = { $0 }) -> [CodexSurfaceFacet]
+    {
+        let query = """
+        select
+            \(expression) as label,
+            count(*),
+            coalesce(sum(tokens_used), 0),
+            coalesce(max(updated_at_ms), max(updated_at * 1000))
+        from threads
+        group by label
+        order by count(*) desc, coalesce(sum(tokens_used), 0) desc
+        limit \(limit)
+        """
+
+        return self.sqliteRows(db, query: query).compactMap { fields in
+            guard fields.count >= 4 else { return nil }
+            return CodexSurfaceFacet(
+                label: labelMap(Self.nilIfEmpty(fields[0]) ?? "unknown"),
+                count: Int(fields[1]) ?? 0,
+                tokens: Int(fields[2]) ?? 0,
+                lastSeenAt: Self.date(fromMilliseconds: fields[3]))
+        }
+    }
+
+    private func topProjects(from db: URL, limit: Int = 8) -> [CodexSurfaceProject] {
+        let query = """
+        select
+            t.cwd,
+            count(*),
+            coalesce(sum(t.tokens_used), 0),
+            coalesce(max(t.updated_at_ms), max(t.updated_at * 1000)),
+            count(distinct t.git_branch),
+            (
+                select title from threads recent
+                where recent.cwd = t.cwd
+                order by coalesce(recent.updated_at_ms, recent.updated_at * 1000) desc
+                limit 1
+            )
+        from threads t
+        group by t.cwd
+        order by coalesce(sum(t.tokens_used), 0) desc, count(*) desc
+        limit \(limit)
+        """
+
+        return self.sqliteRows(db, query: query).compactMap { fields in
+            guard fields.count >= 6 else { return nil }
+            let path = fields[0]
+            return CodexSurfaceProject(
+                name: Self.projectName(from: path),
+                path: path,
+                threadCount: Int(fields[1]) ?? 0,
+                tokens: Int(fields[2]) ?? 0,
+                branchCount: Int(fields[4]) ?? 0,
+                latestTitle: Self.nilIfEmpty(fields[5]),
+                lastActivityAt: Self.date(fromMilliseconds: fields[3]))
+        }
+    }
+
+    private func recentThreads(from db: URL, limit: Int = 8) -> [CodexSurfaceThread] {
+        let query = """
+        select
+            coalesce(nullif(title, ''), nullif(first_user_message, ''), 'Untitled thread'),
+            cwd,
+            coalesce(nullif(model, ''), nullif(model_provider, '')),
+            coalesce(nullif(reasoning_effort, ''), ''),
+            tokens_used,
+            coalesce(updated_at_ms, updated_at * 1000),
+            coalesce(nullif(git_branch, ''), '')
+        from threads
+        order by coalesce(updated_at_ms, updated_at * 1000) desc
+        limit \(limit)
+        """
+
+        return self.sqliteRows(db, query: query).compactMap { fields in
+            guard fields.count >= 7 else { return nil }
+            return CodexSurfaceThread(
+                title: Self.condensed(fields[0], maxLength: 72),
+                projectName: Self.projectName(from: fields[1]),
+                modelName: Self.nilIfEmpty(fields[2]),
+                reasoningEffort: Self.nilIfEmpty(fields[3]),
+                tokens: Int(fields[4]) ?? 0,
+                lastActivityAt: Self.date(fromMilliseconds: fields[5]),
+                gitBranch: Self.nilIfEmpty(fields[6]))
+        }
+    }
+
+    private func activityDays(from db: URL, limit: Int = 14) -> [CodexSurfaceActivityDay] {
+        let query = """
+        select
+            strftime('%m/%d', coalesce(updated_at_ms, updated_at * 1000) / 1000, 'unixepoch'),
+            count(*),
+            coalesce(sum(tokens_used), 0),
+            coalesce(max(updated_at_ms), max(updated_at * 1000))
+        from threads
+        where coalesce(updated_at_ms, updated_at * 1000) > 0
+        group by strftime('%Y-%m-%d', coalesce(updated_at_ms, updated_at * 1000) / 1000, 'unixepoch')
+        order by coalesce(max(updated_at_ms), max(updated_at * 1000)) desc
+        limit \(limit)
+        """
+
+        return self.sqliteRows(db, query: query).compactMap { fields in
+            guard fields.count >= 4 else { return nil }
+            return CodexSurfaceActivityDay(
+                label: Self.nilIfEmpty(fields[0]) ?? "day",
+                threadCount: Int(fields[1]) ?? 0,
+                tokens: Int(fields[2]) ?? 0,
+                date: Self.date(fromMilliseconds: fields[3]))
+        }
+        .reversed()
+    }
+
+    private func automationStats(from db: URL) -> CodexAutomationSnapshot {
+        guard self.exists(db) else { return .empty }
+        let query = """
+        select
+            (select count(*) from agent_jobs),
+            (select count(*) from thread_goals),
+            (select count(*) from thread_dynamic_tools),
+            (select count(*) from thread_spawn_edges)
+        """
+        guard let fields = self.sqliteRows(db, query: query).first,
+              fields.count >= 4
+        else { return .empty }
+        return CodexAutomationSnapshot(
+            agentJobs: Int(fields[0]) ?? 0,
+            activeGoals: Int(fields[1]) ?? 0,
+            dynamicTools: Int(fields[2]) ?? 0,
+            spawnEdges: Int(fields[3]) ?? 0)
+    }
+
+    private func rolloutEventMix(from root: URL, limit: Int = 24) -> CodexRolloutEventMix {
+        let files = self.recentRolloutFiles(in: root, limit: limit)
+        var tokenEvents = 0
+        var toolCalls = 0
+        var shellCommands = 0
+        var patchEvents = 0
+        var webSearches = 0
+        var errors = 0
+        var compactions = 0
+
+        for file in files {
+            guard let content = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            for line in content.split(separator: "\n") {
+                guard let data = line.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+
+                let topType = object["type"] as? String
+                let payload = object["payload"] as? [String: Any]
+                let payloadType = payload?["type"] as? String
+
+                if payloadType == "token_count" { tokenEvents += 1 }
+                if topType == "response_item", payloadType == "function_call" { toolCalls += 1 }
+                if payloadType == "exec_command_end" { shellCommands += 1 }
+                if payloadType?.contains("patch") == true { patchEvents += 1 }
+                if payloadType?.contains("web_search") == true { webSearches += 1 }
+                if topType == "error" || payloadType?.contains("error") == true { errors += 1 }
+                if payloadType?.contains("compact") == true { compactions += 1 }
+            }
+        }
+
+        return CodexRolloutEventMix(
+            tokenEvents: tokenEvents,
+            toolCalls: toolCalls,
+            shellCommands: shellCommands,
+            patchEvents: patchEvents,
+            webSearches: webSearches,
+            errors: errors,
+            compactions: compactions)
+    }
+
+    private func recentRolloutFiles(in root: URL, limit: Int) -> [URL] {
+        guard let enumerator = self.fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return [] }
+
+        var files: [(url: URL, modified: Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                ?? .distantPast
+            files.append((url, modified))
+        }
+        return files
+            .sorted { $0.modified > $1.modified }
+            .prefix(limit)
+            .map(\.url)
+    }
+
+    private func sqliteRows(_ db: URL, query: String) -> [[String]] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = ["-readonly", "-tabs", db.path, query]
+
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return []
+        }
+
+        guard process.terminationStatus == 0 else { return [] }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard let string = String(data: data, encoding: .utf8) else { return [] }
+        return string
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).components(separatedBy: "\t") }
+    }
+
+    private func countFiles(in root: URL, pathExtension: String) -> Int {
+        guard let enumerator = self.fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])
+        else { return 0 }
+
+        var count = 0
+        for case let url as URL in enumerator where url.pathExtension == pathExtension {
+            count += 1
+        }
+        return count
+    }
+
+    private func countDirectories(in root: URL) -> Int {
+        guard let urls = try? self.fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles])
+        else { return 0 }
+
+        return urls.reduce(0) { partial, url in
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            return partial + (isDirectory ? 1 : 0)
+        }
+    }
+
+    private func exists(_ url: URL) -> Bool {
+        self.fileManager.fileExists(atPath: url.path)
+    }
+
+    private func tildePath(_ url: URL, home: URL) -> String {
+        let path = url.path
+        let homePath = home.path
+        if path == homePath { return "~" }
+        if path.hasPrefix(homePath + "/") {
+            return "~" + String(path.dropFirst(homePath.count))
+        }
+        return path
+    }
+
+    private static func date(fromMilliseconds value: String) -> Date? {
+        guard let milliseconds = Double(value), milliseconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: milliseconds / 1_000)
+    }
+
+    private static func nilIfEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func projectName(from path: String) -> String {
+        guard !path.isEmpty else { return "Codex" }
+        return URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private static func sandboxLabel(from raw: String) -> String {
+        if raw.contains("danger-full-access") { return "full access" }
+        if raw.contains("workspace-write") { return "workspace write" }
+        if raw.contains("read-only") { return "read only" }
+        return raw.isEmpty ? "unknown" : raw
+    }
+
+    private static func condensed(_ value: String, maxLength: Int) -> String {
+        let singleLine = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard singleLine.count > maxLength else { return singleLine }
+        return String(singleLine.prefix(maxLength - 1)) + "..."
+    }
+
+    private struct StateStats {
+        let threadCount: Int
+        let projectCount: Int
+        let totalTokens: Int
+        let archivedThreadCount: Int
+        let firstThreadAt: Date?
+        let lastThreadAt: Date?
+        let models: [CodexSurfaceFacet]
+        let reasoningEfforts: [CodexSurfaceFacet]
+        let approvalModes: [CodexSurfaceFacet]
+        let sandboxPolicies: [CodexSurfaceFacet]
+        let topProjects: [CodexSurfaceProject]
+        let recentThreads: [CodexSurfaceThread]
+        let activityDays: [CodexSurfaceActivityDay]
     }
 }
 

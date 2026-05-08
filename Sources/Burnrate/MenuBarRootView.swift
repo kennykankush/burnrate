@@ -229,6 +229,7 @@ private struct TabButton: View {
                 Text(self.tab.label)
                     .font(.geist(size: 11, weight: self.isActive ? .semibold : .medium))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.72)
             }
             .help("\(self.tab.label) — ⌘\(String(self.tab.keyEquivalent))")
             .frame(maxWidth: .infinity)
@@ -276,6 +277,7 @@ private struct TabContent: View {
                             overview: self.model.overview,
                             turnPattern: self.turnPattern(for: snapshot),
                             model: self.model)
+                    case .surface: SurfaceView(snapshot: snapshot)
                     case .patterns: PatternsView(snapshot: snapshot)
                     case .wrap: WrapView(snapshot: snapshot)
                     case .health: HealthView(snapshot: snapshot)
@@ -472,7 +474,7 @@ private struct StatuslinePulse: View {
             if s < 60 { return "\(s)s ago" }
             return "\(s / 60)m ago"
         }()
-        return "\(title) · turn \(session.toolCalls) · \(lastSeen)"
+        return "\(title) · \(session.toolCalls) tools · \(lastSeen)"
     }
 
     private func glyph(for tool: String?) -> String {

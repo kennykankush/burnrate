@@ -988,6 +988,78 @@ private struct FlatTaskRibbon: View {
     }
 }
 
+// MARK: - Surface tab
+
+struct SurfaceView: View {
+    let snapshot: ProviderUsageSnapshot
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if let surface = self.snapshot.codexSurface {
+                    CodexSurfaceOverviewPanel(surface: surface, context: self.snapshot.workContext)
+                    if !surface.activityDays.isEmpty {
+                        CodexActivityPulseCard(surface: surface)
+                    }
+                    CodexProjectLeaderboardCard(surface: surface)
+                    CodexRecentThreadsCard(surface: surface)
+
+                    if let session = self.snapshot.codexSession {
+                        VStack(alignment: .leading, spacing: 8) {
+                            InlineSectionLabel(title: "Current Work")
+                            CodexTelemetryCard(session: session)
+                            if !session.flightEvents.isEmpty {
+                                CodexFlightRecorderCard(session: session)
+                            }
+                        }
+                    }
+                } else {
+                    SurfaceEmptyView(snapshot: self.snapshot)
+                }
+            }
+            .padding(.leading, DesignSystem.Layout.contentPadding)
+            .padding(.trailing, DesignSystem.Layout.contentPadding)
+            .padding(.vertical, 14)
+        }
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct SurfaceEmptyView: View {
+    let snapshot: ProviderUsageSnapshot
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: self.snapshot.kind == .codex ? "square.stack.3d.up" : "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.brandLavender)
+            Text(self.title)
+                .font(.geist(size: 13, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+            Text(self.detail)
+                .font(.geist(size: 11))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(36)
+        .brandGlass(cornerRadius: DesignSystem.Layout.cardRadius)
+    }
+
+    private var title: String {
+        self.snapshot.kind == .codex
+            ? "Codex map warming up"
+            : "Switch to Codex"
+    }
+
+    private var detail: String {
+        self.snapshot.kind == .codex
+            ? "The work map appears once Codex has a local thread to read."
+            : "This tab summarizes Codex work, projects, recent threads, and active context."
+    }
+}
+
 // MARK: - Patterns tab
 
 struct PatternsView: View {
@@ -998,8 +1070,8 @@ struct PatternsView: View {
             VStack(alignment: .leading, spacing: 14) {
                 if self.snapshot.kind == .claude {
                     ClaudePatternsTabContent(cards: self.snapshot.patternCards.filter { Self.patternsTabKinds.contains($0.kind) })
-                } else if let session = self.snapshot.codexSession {
-                    CodexPatternsTabContent(session: session)
+                } else if self.snapshot.kind == .codex {
+                    CodexPatternsNativeView(snapshot: self.snapshot)
                 }
 
                 if self.snapshot.patternCards.isEmpty && self.snapshot.kind == .claude {
@@ -1342,11 +1414,8 @@ struct WrapView: View {
                             }
                         }
                     }
-                } else if let memory = self.snapshot.codexMemory {
-                    VStack(alignment: .leading, spacing: 10) {
-                        InlineSectionLabel(title: "Project Memory")
-                        CodexMemoryCard(memory: memory)
-                    }
+                } else if self.snapshot.kind == .codex {
+                    CodexWrapNativeView(snapshot: self.snapshot)
                 } else {
                     EmptyWrapView()
                 }
@@ -1725,11 +1794,8 @@ struct HealthView: View {
                             FlatToolHistogram(session: session)
                         }
                     }
-                } else if let session = self.snapshot.codexSession {
-                    VStack(alignment: .leading, spacing: 10) {
-                        InlineSectionLabel(title: "Health")
-                        CodexHealthSummary(session: session)
-                    }
+                } else if self.snapshot.kind == .codex {
+                    CodexHealthNativeView(snapshot: self.snapshot)
                 }
             }
             .padding(.leading, DesignSystem.Layout.contentPadding)

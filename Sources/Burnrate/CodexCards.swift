@@ -228,6 +228,229 @@ struct CodexMemoryCard: View {
     }
 }
 
+// MARK: - Codex surface map
+
+struct CodexSurfaceIcebergCard: View {
+    let surface: CodexSurfaceSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Codex surface")
+                        .font(.geist(size: 14, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                    Text(self.surface.rootPath)
+                        .font(.geistMono(size: 9))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text("\(self.surface.readySourceCount)/\(self.surface.sources.count)")
+                        .font(.geistMono(size: 24, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.accent(for: .codex))
+                        .contentTransition(.numericText())
+                    Text("readable")
+                        .font(.geist(size: 9))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                }
+            }
+
+            HStack(spacing: 6) {
+                SurfaceMetric(title: "Rollouts", value: "\(self.surface.rolloutFilesSeen)")
+                SurfaceMetric(title: "Threads", value: "\(self.surface.stateThreadsSeen)")
+                SurfaceMetric(title: "Projects", value: "\(self.surface.projectsSeen)")
+                SurfaceMetric(title: "Live", value: "\(self.surface.liveSessionsSeen)")
+            }
+
+            VStack(spacing: 7) {
+                ForEach(self.surface.iceberg) { layer in
+                    SurfaceLayerRow(
+                        layer: layer,
+                        sources: self.sources(for: layer))
+                }
+            }
+        }
+        .padding(DesignSystem.Layout.cardPadding)
+        .brandGlass(cornerRadius: DesignSystem.Layout.cardRadius)
+    }
+
+    private func sources(for layer: CodexSurfaceLayer) -> [CodexSurfaceArea] {
+        let sourceByKey = Dictionary(uniqueKeysWithValues: self.surface.sources.map { ($0.key, $0) })
+        return layer.sourceKeys.compactMap { sourceByKey[$0] }
+    }
+}
+
+private struct SurfaceMetric: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(self.title.uppercased())
+                .font(.geist(size: 8, weight: .medium))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+            Text(self.value)
+                .font(.geistMono(size: 13, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .brandGlassThin(cornerRadius: 7)
+    }
+}
+
+private struct SurfaceLayerRow: View {
+    let layer: CodexSurfaceLayer
+    let sources: [CodexSurfaceArea]
+
+    private var readyCount: Int {
+        self.sources.filter { $0.status.isReady }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(self.layer.depth.label)
+                    .font(.geist(size: 9, weight: .bold))
+                    .foregroundStyle(self.layer.depth.color)
+                    .tracking(1.0)
+                    .frame(width: 58, alignment: .leading)
+                Text(self.layer.title)
+                    .font(.geist(size: 12, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                Spacer()
+                Text("\(self.readyCount)/\(self.sources.count)")
+                    .font(.geistMono(size: 10, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+            }
+            Text(self.layer.detail)
+                .font(.geist(size: 10))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 5) {
+                ForEach(self.sources.prefix(4)) { source in
+                    SurfaceSourcePill(source: source)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(self.layer.depth.color.opacity(0.07))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(self.layer.depth.color.opacity(0.18), lineWidth: 0.8)
+                }
+        }
+    }
+}
+
+private struct SurfaceSourcePill: View {
+    let source: CodexSurfaceArea
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(self.source.status.color)
+                .frame(width: 5, height: 5)
+            Text(self.source.title)
+                .font(.geist(size: 9, weight: .medium))
+                .foregroundStyle(DesignSystem.Colors.secondaryText)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(self.source.status.color.opacity(0.10), in: Capsule())
+    }
+}
+
+struct CodexSurfaceInventoryCard: View {
+    let surface: CodexSurfaceSnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("Inventory")
+                    .font(.geist(size: 13, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                Spacer()
+                if let depth = self.surface.deepestReadyDepth {
+                    Text("deepest: \(depth.label.lowercased())")
+                        .font(.geistMono(size: 9))
+                        .foregroundStyle(depth.color)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(self.surface.sources.enumerated()), id: \.element.id) { idx, source in
+                    SurfaceInventoryRow(source: source)
+                    if idx < self.surface.sources.count - 1 {
+                        Divider().background(DesignSystem.Colors.stroke.opacity(0.35))
+                    }
+                }
+            }
+        }
+        .padding(DesignSystem.Layout.cardPadding)
+        .brandGlass(cornerRadius: DesignSystem.Layout.cardRadius)
+    }
+}
+
+private struct SurfaceInventoryRow: View {
+    let source: CodexSurfaceArea
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: self.source.status.symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(self.source.status.color)
+                .frame(width: 18, height: 18)
+                .background(self.source.status.color.opacity(0.12), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(self.source.title)
+                        .font(.geist(size: 11, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.secondaryText)
+                        .lineLimit(1)
+                    Text(self.source.depth.label)
+                        .font(.geist(size: 8, weight: .bold))
+                        .foregroundStyle(self.source.depth.color)
+                        .tracking(0.7)
+                    if let count = self.source.count {
+                        Text("\(count)")
+                            .font(.geistMono(size: 9, weight: .semibold))
+                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    }
+                }
+                Text(self.source.detail)
+                    .font(.geist(size: 9))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let path = self.source.pathHint {
+                    Text(path)
+                        .font(.geistMono(size: 8))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText.opacity(0.82))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 7)
+    }
+}
+
 // MARK: - Codex telemetry card
 
 struct CodexTelemetryCard: View {
@@ -440,5 +663,45 @@ struct TelemetryMetric: View {
         .padding(.horizontal, 7)
         .frame(height: 44)
         .brandGlassThin(cornerRadius: 7)
+    }
+}
+
+private extension CodexSurfaceStatus {
+    var color: Color {
+        switch self {
+        case .active: DesignSystem.Colors.success
+        case .available: DesignSystem.Colors.accent(for: .codex)
+        case .warning: DesignSystem.Colors.warning
+        case .missing: DesignSystem.Colors.tertiaryText
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .active: "checkmark.circle.fill"
+        case .available: "circle"
+        case .warning: "exclamationmark.triangle.fill"
+        case .missing: "minus.circle"
+        }
+    }
+}
+
+private extension CodexSurfaceDepth {
+    var label: String {
+        switch self {
+        case .visible: "VISIBLE"
+        case .shallow: "SHALLOW"
+        case .deep: "DEEP"
+        case .abyss: "ABYSS"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .visible: DesignSystem.Colors.success
+        case .shallow: DesignSystem.Colors.accent(for: .codex)
+        case .deep: DesignSystem.Colors.warning
+        case .abyss: DesignSystem.Colors.danger
+        }
     }
 }

@@ -68,6 +68,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
     public let workContext: WorkContextSnapshot?
     public let codexSession: CodexSessionStats?
     public let codexMemory: CodexProjectMemory?
+    public let codexSurface: CodexSurfaceSnapshot?
     public let claudeSession: ClaudeSessionStats?
     public let claudeAggregate: ClaudeAggregateStats?
     public let claudeFacets: ClaudeFacets?
@@ -97,6 +98,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         workContext: WorkContextSnapshot? = nil,
         codexSession: CodexSessionStats? = nil,
         codexMemory: CodexProjectMemory? = nil,
+        codexSurface: CodexSurfaceSnapshot? = nil,
         claudeSession: ClaudeSessionStats? = nil,
         claudeAggregate: ClaudeAggregateStats? = nil,
         claudeFacets: ClaudeFacets? = nil,
@@ -120,6 +122,7 @@ public struct ProviderUsageSnapshot: Codable, Equatable, Identifiable, Sendable 
         self.workContext = workContext
         self.codexSession = codexSession
         self.codexMemory = codexMemory
+        self.codexSurface = codexSurface
         self.claudeSession = claudeSession
         self.claudeAggregate = claudeAggregate
         self.claudeFacets = claudeFacets
@@ -461,6 +464,353 @@ public struct CodexSessionInsight: Codable, Equatable, Sendable {
         self.lastTurnSharePercent = min(100, max(0, lastTurnSharePercent))
         self.projectedTurnsRemaining = projectedTurnsRemaining
         self.tokensPerMinute = max(0, tokensPerMinute)
+    }
+}
+
+public struct CodexSurfaceSnapshot: Codable, Equatable, Sendable {
+    public let rootPath: String
+    public let capturedAt: Date
+    public let sources: [CodexSurfaceArea]
+    public let iceberg: [CodexSurfaceLayer]
+    public let sessionsSeen: Int
+    public let liveSessionsSeen: Int
+    public let projectsSeen: Int
+    public let stateThreadsSeen: Int
+    public let rolloutFilesSeen: Int
+    public let totalThreadTokens: Int
+    public let archivedThreadsSeen: Int
+    public let firstThreadAt: Date?
+    public let lastThreadAt: Date?
+    public let modelFacets: [CodexSurfaceFacet]
+    public let reasoningFacets: [CodexSurfaceFacet]
+    public let approvalFacets: [CodexSurfaceFacet]
+    public let sandboxFacets: [CodexSurfaceFacet]
+    public let topProjects: [CodexSurfaceProject]
+    public let recentThreads: [CodexSurfaceThread]
+    public let activityDays: [CodexSurfaceActivityDay]
+    public let rolloutEventMix: CodexRolloutEventMix
+    public let automation: CodexAutomationSnapshot
+
+    public var activeSourceCount: Int {
+        self.sources.filter { $0.status == .active }.count
+    }
+
+    public var readySourceCount: Int {
+        self.sources.filter { $0.status.isReady }.count
+    }
+
+    public var warningSourceCount: Int {
+        self.sources.filter { $0.status == .warning }.count
+    }
+
+    public var missingSourceCount: Int {
+        self.sources.filter { $0.status == .missing }.count
+    }
+
+    public var primarySummary: String {
+        "\(self.readySourceCount)/\(self.sources.count) signals ready"
+    }
+
+    public var deepestReadyDepth: CodexSurfaceDepth? {
+        self.sources
+            .filter { $0.status.isReady }
+            .map(\.depth)
+            .max { $0.rank < $1.rank }
+    }
+
+    public init(
+        rootPath: String,
+        capturedAt: Date,
+        sources: [CodexSurfaceArea],
+        iceberg: [CodexSurfaceLayer],
+        sessionsSeen: Int,
+        liveSessionsSeen: Int,
+        projectsSeen: Int,
+        stateThreadsSeen: Int,
+        rolloutFilesSeen: Int,
+        totalThreadTokens: Int = 0,
+        archivedThreadsSeen: Int = 0,
+        firstThreadAt: Date? = nil,
+        lastThreadAt: Date? = nil,
+        modelFacets: [CodexSurfaceFacet] = [],
+        reasoningFacets: [CodexSurfaceFacet] = [],
+        approvalFacets: [CodexSurfaceFacet] = [],
+        sandboxFacets: [CodexSurfaceFacet] = [],
+        topProjects: [CodexSurfaceProject] = [],
+        recentThreads: [CodexSurfaceThread] = [],
+        activityDays: [CodexSurfaceActivityDay] = [],
+        rolloutEventMix: CodexRolloutEventMix = .empty,
+        automation: CodexAutomationSnapshot = .empty)
+    {
+        self.rootPath = rootPath
+        self.capturedAt = capturedAt
+        self.sources = sources
+        self.iceberg = iceberg
+        self.sessionsSeen = sessionsSeen
+        self.liveSessionsSeen = liveSessionsSeen
+        self.projectsSeen = projectsSeen
+        self.stateThreadsSeen = stateThreadsSeen
+        self.rolloutFilesSeen = rolloutFilesSeen
+        self.totalThreadTokens = totalThreadTokens
+        self.archivedThreadsSeen = archivedThreadsSeen
+        self.firstThreadAt = firstThreadAt
+        self.lastThreadAt = lastThreadAt
+        self.modelFacets = modelFacets
+        self.reasoningFacets = reasoningFacets
+        self.approvalFacets = approvalFacets
+        self.sandboxFacets = sandboxFacets
+        self.topProjects = topProjects
+        self.recentThreads = recentThreads
+        self.activityDays = activityDays
+        self.rolloutEventMix = rolloutEventMix
+        self.automation = automation
+    }
+}
+
+public struct CodexSurfaceArea: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { self.key.rawValue }
+
+    public let key: CodexSurfaceKey
+    public let title: String
+    public let detail: String
+    public let pathHint: String?
+    public let status: CodexSurfaceStatus
+    public let depth: CodexSurfaceDepth
+    public let count: Int?
+    public let sensitivity: String
+
+    public init(
+        key: CodexSurfaceKey,
+        title: String,
+        detail: String,
+        pathHint: String?,
+        status: CodexSurfaceStatus,
+        depth: CodexSurfaceDepth,
+        count: Int? = nil,
+        sensitivity: String)
+    {
+        self.key = key
+        self.title = title
+        self.detail = detail
+        self.pathHint = pathHint
+        self.status = status
+        self.depth = depth
+        self.count = count
+        self.sensitivity = sensitivity
+    }
+}
+
+public enum CodexSurfaceKey: String, Codable, Equatable, Sendable {
+    case root
+    case auth
+    case quota
+    case sessions
+    case liveSessions
+    case stateDB
+    case config
+    case skills
+    case plugins
+    case logs
+    case projectMemory
+}
+
+public enum CodexSurfaceStatus: String, Codable, Equatable, Sendable {
+    case active
+    case available
+    case warning
+    case missing
+
+    public var isReady: Bool {
+        switch self {
+        case .active, .available: true
+        case .warning, .missing: false
+        }
+    }
+}
+
+public enum CodexSurfaceDepth: String, Codable, Equatable, Sendable {
+    case visible
+    case shallow
+    case deep
+    case abyss
+
+    public var rank: Int {
+        switch self {
+        case .visible: 0
+        case .shallow: 1
+        case .deep: 2
+        case .abyss: 3
+        }
+    }
+}
+
+public struct CodexSurfaceLayer: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { self.depth.rawValue }
+
+    public let depth: CodexSurfaceDepth
+    public let title: String
+    public let detail: String
+    public let sourceKeys: [CodexSurfaceKey]
+
+    public init(
+        depth: CodexSurfaceDepth,
+        title: String,
+        detail: String,
+        sourceKeys: [CodexSurfaceKey])
+    {
+        self.depth = depth
+        self.title = title
+        self.detail = detail
+        self.sourceKeys = sourceKeys
+    }
+}
+
+public struct CodexSurfaceFacet: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { self.label }
+
+    public let label: String
+    public let count: Int
+    public let tokens: Int
+    public let lastSeenAt: Date?
+
+    public init(label: String, count: Int, tokens: Int, lastSeenAt: Date?) {
+        self.label = label
+        self.count = max(0, count)
+        self.tokens = max(0, tokens)
+        self.lastSeenAt = lastSeenAt
+    }
+}
+
+public struct CodexSurfaceProject: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { self.path }
+
+    public let name: String
+    public let path: String
+    public let threadCount: Int
+    public let tokens: Int
+    public let branchCount: Int
+    public let latestTitle: String?
+    public let lastActivityAt: Date?
+
+    public init(
+        name: String,
+        path: String,
+        threadCount: Int,
+        tokens: Int,
+        branchCount: Int,
+        latestTitle: String?,
+        lastActivityAt: Date?)
+    {
+        self.name = name
+        self.path = path
+        self.threadCount = max(0, threadCount)
+        self.tokens = max(0, tokens)
+        self.branchCount = max(0, branchCount)
+        self.latestTitle = latestTitle
+        self.lastActivityAt = lastActivityAt
+    }
+}
+
+public struct CodexSurfaceThread: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { "\(self.projectName)-\(self.title)-\(self.lastActivityAt?.timeIntervalSince1970 ?? 0)" }
+
+    public let title: String
+    public let projectName: String
+    public let modelName: String?
+    public let reasoningEffort: String?
+    public let tokens: Int
+    public let lastActivityAt: Date?
+    public let gitBranch: String?
+
+    public init(
+        title: String,
+        projectName: String,
+        modelName: String?,
+        reasoningEffort: String?,
+        tokens: Int,
+        lastActivityAt: Date?,
+        gitBranch: String?)
+    {
+        self.title = title
+        self.projectName = projectName
+        self.modelName = modelName
+        self.reasoningEffort = reasoningEffort
+        self.tokens = max(0, tokens)
+        self.lastActivityAt = lastActivityAt
+        self.gitBranch = gitBranch
+    }
+}
+
+public struct CodexSurfaceActivityDay: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { self.label }
+
+    public let label: String
+    public let threadCount: Int
+    public let tokens: Int
+    public let date: Date?
+
+    public init(label: String, threadCount: Int, tokens: Int, date: Date?) {
+        self.label = label
+        self.threadCount = max(0, threadCount)
+        self.tokens = max(0, tokens)
+        self.date = date
+    }
+}
+
+public struct CodexRolloutEventMix: Codable, Equatable, Sendable {
+    public let tokenEvents: Int
+    public let toolCalls: Int
+    public let shellCommands: Int
+    public let patchEvents: Int
+    public let webSearches: Int
+    public let errors: Int
+    public let compactions: Int
+
+    public static let empty = CodexRolloutEventMix(
+        tokenEvents: 0,
+        toolCalls: 0,
+        shellCommands: 0,
+        patchEvents: 0,
+        webSearches: 0,
+        errors: 0,
+        compactions: 0)
+
+    public init(
+        tokenEvents: Int,
+        toolCalls: Int,
+        shellCommands: Int,
+        patchEvents: Int,
+        webSearches: Int,
+        errors: Int,
+        compactions: Int)
+    {
+        self.tokenEvents = max(0, tokenEvents)
+        self.toolCalls = max(0, toolCalls)
+        self.shellCommands = max(0, shellCommands)
+        self.patchEvents = max(0, patchEvents)
+        self.webSearches = max(0, webSearches)
+        self.errors = max(0, errors)
+        self.compactions = max(0, compactions)
+    }
+}
+
+public struct CodexAutomationSnapshot: Codable, Equatable, Sendable {
+    public let agentJobs: Int
+    public let activeGoals: Int
+    public let dynamicTools: Int
+    public let spawnEdges: Int
+
+    public static let empty = CodexAutomationSnapshot(
+        agentJobs: 0,
+        activeGoals: 0,
+        dynamicTools: 0,
+        spawnEdges: 0)
+
+    public init(agentJobs: Int, activeGoals: Int, dynamicTools: Int, spawnEdges: Int) {
+        self.agentJobs = max(0, agentJobs)
+        self.activeGoals = max(0, activeGoals)
+        self.dynamicTools = max(0, dynamicTools)
+        self.spawnEdges = max(0, spawnEdges)
     }
 }
 

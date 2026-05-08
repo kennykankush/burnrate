@@ -5,6 +5,7 @@ import SwiftUI
 
 enum AppTab: String, CaseIterable, Identifiable {
     case now
+    case surface
     case patterns
     case wrap
     case health
@@ -14,6 +15,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .now: "Now"
+        case .surface: "Map"
         case .patterns: "Patterns"
         case .wrap: "Wrap"
         case .health: "Health"
@@ -23,20 +25,22 @@ enum AppTab: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .now: "flame"
+        case .surface: "map"
         case .patterns: "square.grid.2x2"
         case .wrap: "calendar"
         case .health: "stethoscope"
         }
     }
 
-    /// Keyboard shortcut bound on each tab button. ⌘1\u{2013}⌘4 follows
+    /// Keyboard shortcut bound on each tab button. ⌘1\u{2013}⌘5 follows
     /// the macOS convention used by Mail, Safari, etc.
     var keyEquivalent: Character {
         switch self {
         case .now: "1"
-        case .patterns: "2"
-        case .wrap: "3"
-        case .health: "4"
+        case .surface: "2"
+        case .patterns: "3"
+        case .wrap: "4"
+        case .health: "5"
         }
     }
 }
@@ -186,6 +190,7 @@ enum MenuBarModule: String, CaseIterable, Identifiable {
     case turnsLeft
     case fiveHour
     case weekly
+    case codexSurface
     case dollarsPerMin
     case tokensPerMin
     case streak
@@ -201,6 +206,7 @@ enum MenuBarModule: String, CaseIterable, Identifiable {
         case .turnsLeft: "LEFT"
         case .fiveHour: "5H"
         case .weekly: "7D"
+        case .codexSurface: "MAP"
         case .dollarsPerMin: "$/M"
         case .tokensPerMin: "BURN"
         case .streak: "STREAK"
@@ -216,6 +222,7 @@ enum MenuBarModule: String, CaseIterable, Identifiable {
         case .turnsLeft: "Turns left"
         case .fiveHour: "5h burst %"
         case .weekly: "Weekly %"
+        case .codexSurface: "Codex map"
         case .dollarsPerMin: "USD / minute"
         case .tokensPerMin: "Tokens / minute"
         case .streak: "Streak"
@@ -704,6 +711,11 @@ final class MenuBarModel {
         case .weekly:
             guard let window = snap.windows.first(where: Self.is7dWindow) else { return nil }
             return MenuBarDisplay(label: module.label, value: "\(Int(window.usedPercent.rounded()))%")
+        case .codexSurface:
+            guard let surface = snap.codexSurface else { return nil }
+            return MenuBarDisplay(
+                label: module.label,
+                value: "\(surface.readySourceCount)/\(surface.sources.count)")
         case .dollarsPerMin:
             guard let usd = snap.claudeSession?.advisor?.usdPerMinute, usd > 0 else { return nil }
             return MenuBarDisplay(label: module.label, value: String(format: "%.2f", usd))
@@ -877,11 +889,7 @@ final class MenuBarModel {
                 }
             }
 
-            let newCount: Int
-            switch snap.kind {
-            case .claude: newCount = snap.claudeSession?.userMessageCount ?? 0
-            case .codex: newCount = snap.codexSession?.toolCalls ?? 0
-            }
+            let newCount = context.userMessageCount
             let newUsed = context.contextUsedTokens
             defer {
                 self.prevUserMessageCount[sid] = newCount

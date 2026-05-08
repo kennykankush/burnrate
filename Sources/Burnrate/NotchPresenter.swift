@@ -103,10 +103,10 @@ private enum NotchPalette {
 
 // MARK: - Tool taxonomy
 
-/// The four hover-switchable tools that live inside the open alcove. Each
-/// is a distinct surface — different viz, different data — not four
-/// variations of the same dashboard. The strip across the top of the
-/// alcove uses mouse-hover (not click) to switch between them.
+/// The hover-switchable tools that live inside the open alcove. Each
+/// is a distinct product story: current pace, patterns, wrap, and health.
+/// The strip across the top of the alcove uses mouse-hover (not click)
+/// to switch between them.
 enum NotchTool: String, CaseIterable, Identifiable {
     /// The complete "right now" picture — context %, 5h burst, weekly
     /// as a ring trio, advisor WHY/WHEN block, and the runway bar.
@@ -439,10 +439,12 @@ final class NotchDisplayState {
         self.providerLabel = snapshot?.kind.displayName ?? ""
         self.isLive = Self.isLive(snapshot: snapshot)
         self.sessionDuration = Self.sessionDurationText(snapshot: snapshot)
-        self.sessionTurns = snapshot?.claudeSession?.userMessageCount
-            ?? snapshot?.codexSession?.toolCalls
+        self.sessionTurns = snapshot?.workContext?.userMessageCount
+            ?? snapshot?.claudeSession?.userMessageCount
             ?? 0
-        self.modelLabel = Self.shortModelLabel(snapshot?.claudeSession?.modelName)
+        self.modelLabel = Self.shortModelLabel(
+            snapshot?.claudeSession?.modelName
+                ?? snapshot?.workContext?.modelName)
         self.gitBranch = snapshot?.claudeSession?.gitBranch
             ?? snapshot?.codexSession?.gitBranch
 
@@ -2238,6 +2240,12 @@ private struct NowTool: View {
                 }
             }
 
+            if self.model.selectedProvider == .codex,
+               let snapshot = self.model.selectedSnapshot
+            {
+                CodexWorkRibbon(snapshot: snapshot)
+            }
+
             // ─────────────────────────────────────────────────
             // Footer monitoring strip — cost today · peak hour · days
             // left in cycle. Sits at the very bottom of NOW, fills the
@@ -2316,6 +2324,96 @@ private struct NowTool: View {
                 try? await Task.sleep(for: .milliseconds(restingPauseMs))
             }
         }
+    }
+}
+
+private struct CodexWorkRibbon: View {
+    let snapshot: ProviderUsageSnapshot
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text("CODEX")
+                        .font(.geist(size: 8, weight: .bold))
+                        .foregroundStyle(NotchPalette.tertiaryText)
+                        .tracking(1.4)
+                    Text(self.projectLabel)
+                        .font(.geistMono(size: 10, weight: .semibold))
+                        .foregroundStyle(NotchPalette.accent)
+                }
+                Text(self.subline)
+                    .font(.geist(size: 9))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(1)
+            }
+            .frame(width: 94, alignment: .leading)
+
+            HStack(spacing: 5) {
+                ForEach(self.pills, id: \.title) { pill in
+                    NotchWorkPill(pill: pill)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(NotchPalette.accent.opacity(0.07))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(NotchPalette.accent.opacity(0.16), lineWidth: 1)
+                }
+        }
+    }
+
+    private var projectLabel: String {
+        self.snapshot.projectLabel
+            ?? self.snapshot.workContext?.directory.map { URL(fileURLWithPath: $0).lastPathComponent }
+            ?? "active"
+    }
+
+    private var subline: String {
+        if let context = self.snapshot.workContext {
+            return "\(Int(context.contextRemainingPercent.rounded()))% context left"
+        }
+        return "waiting for a live thread"
+    }
+
+    private var pills: [WorkPill] {
+        let surface = self.snapshot.codexSurface
+        let session = self.snapshot.codexSession
+        return [
+            WorkPill(title: "\(surface?.projectsSeen ?? 0) projects", color: NotchPalette.accent),
+            WorkPill(title: "\(surface?.stateThreadsSeen ?? 0) threads", color: NotchPalette.toneCalm),
+            WorkPill(title: "\(session?.toolCalls ?? surface?.rolloutEventMix.toolCalls ?? 0) tools", color: NotchPalette.toneWatch),
+        ]
+    }
+}
+
+private struct WorkPill {
+    let title: String
+    let color: Color
+}
+
+private struct NotchWorkPill: View {
+    let pill: WorkPill
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(self.pill.color)
+                .frame(width: 5, height: 5)
+            Text(self.pill.title)
+                .font(.geist(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.secondaryText)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(self.pill.color.opacity(0.10), in: Capsule())
     }
 }
 
@@ -2569,9 +2667,9 @@ private struct VerdictHero: View {
     /// % of the context window the last turn actually added.
     /// Pulled from the model's rolling turn-delta history (which
     /// `detectFireEvents` builds by diffing `contextUsedTokens`
-    /// poll-over-poll) rather than the watcher's broken
-    /// `lastTurnSharePercent` — that field reports cumulative
-    /// state, not the per-turn delta.
+    /// poll-over-poll). The provider advisor has its own estimate,
+    /// but this path keeps the notch tied to the same observed deltas
+    /// used for the turn buckets.
     private var lastTurnDeltaPercent: Double? {
         guard let snap = self.model.selectedSnapshot,
               let ctx = snap.workContext,
@@ -2664,12 +2762,9 @@ private struct VerdictHero: View {
                         // Last-turn share — computed as the DELTA of
                         // contextUsedTokens between the previous and
                         // current poll, divided by the window size.
-                        // The advisor's `lastTurnSharePercent` field
-                        // is broken (it computes cumulative state,
-                        // not delta), so we read from the model's
-                        // turn-pattern history instead — that's what
-                        // `detectFireEvents` records each time a new
-                        // user message arrives.
+                        // We read from the model's turn-pattern
+                        // history so this line matches the bucket
+                        // forecast below.
                         if let lastDelta = self.lastTurnDeltaPercent,
                            lastDelta > 0
                         {
