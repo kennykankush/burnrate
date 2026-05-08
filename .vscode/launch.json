@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ai-usage-app}",
+            "name": "Debug burnrate",
+            "target": "burnrate",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug burnrate"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:ai-usage-app}",
+            "name": "Release burnrate",
+            "target": "burnrate",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release burnrate"
+        }
+    ]
+}
