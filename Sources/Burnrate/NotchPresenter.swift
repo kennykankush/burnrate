@@ -194,6 +194,8 @@ final class NotchPresenter {
         let notchSize = self.computedNotchSize(for: screen)
         let detected = screen.notchFrame?.size
             ?? NSSize(width: 200, height: max(screen.frame.maxY - screen.visibleFrame.maxY, 24))
+        let panelWidth: CGFloat = Self.panelWidth
+        let panelHeight: CGFloat = notchSize.height + NotchMorphHost.maxDrawerHeight + 40
 
         let host = NSHostingView(rootView: NotchMorphHost(
             state: self.displayState,
@@ -201,13 +203,16 @@ final class NotchPresenter {
             detectedNotchWidth: detected.width,
             detectedNotchHeight: detected.height
         ))
+        if #available(macOS 13.0, *) {
+            host.sizingOptions = []
+        }
         host.translatesAutoresizingMaskIntoConstraints = true
+        host.autoresizingMask = [.width, .height]
+        host.frame = NSRect(origin: .zero, size: NSSize(width: panelWidth, height: panelHeight))
 
         let panel = NotchPanel()
         panel.contentView = host
 
-        let panelWidth: CGFloat = Self.panelWidth
-        let panelHeight: CGFloat = notchSize.height + NotchMorphHost.maxDrawerHeight + 40
         let origin = NSPoint(
             x: screen.frame.midX - (panelWidth / 2),
             y: screen.frame.maxY - panelHeight
@@ -1602,6 +1607,7 @@ private struct NotchMorphHost: View {
             // alcove is open so the morph-close animation isn't
             // interrupted by a measurement late in life.
             guard newHeight > 0 else { return }
+            guard abs(self.measuredContentHeight - newHeight) > 1 else { return }
             self.measuredContentHeight = newHeight
             if self.isHovering {
                 let target = self.finalHeight
