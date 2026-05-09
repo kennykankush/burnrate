@@ -1,114 +1,91 @@
 import Foundation
 
 public actor UsageSnapshotSource {
+    private let codexFetcher = CodexUsageFetcher()
+    private let claudeWatcher = ClaudeUsageWatcher()
+
     public init() {}
 
     public func loadOverview(
         recentDailySpend: Double? = nil,
-        pinnedClaudeSessionId: String? = nil) async throws -> UsageOverview
+        pinnedClaudeSessionId: String? = nil,
+        pinnedCodexSessionId: String? = nil,
+        focusedProvider: ProviderKind? = nil,
+        existingOverview: UsageOverview? = nil) async throws -> UsageOverview
     {
         let now = Date()
-        async let codexAsync = CodexUsageFetcher().loadSnapshot(now: now)
-        async let claudeAsync = ClaudeUsageWatcher().loadSnapshot(
+        if let focusedProvider, let existingOverview, !existingOverview.snapshots.isEmpty {
+            switch focusedProvider {
+            case .codex:
+                let base = existingOverview.snapshot(for: .codex)
+                let codex = await self.codexFetcher.loadPreviewSnapshot(
+                    now: now,
+                    pinnedSessionId: pinnedCodexSessionId,
+                    preserving: base)
+                return Self.replacing(.codex, with: codex, in: existingOverview, updatedAt: now)
+            case .claude:
+                let base = existingOverview.snapshot(for: .claude)
+                let claude = await self.claudeWatcher.loadPreviewSnapshot(
+                    now: now,
+                    pinnedSessionId: pinnedClaudeSessionId,
+                    preserving: base)
+                return Self.replacing(.claude, with: claude, in: existingOverview, updatedAt: now)
+            }
+        }
+
+        async let codexAsync = self.codexFetcher.loadSnapshot(
+            now: now,
+            pinnedSessionId: pinnedCodexSessionId)
+        async let claudeAsync = self.claudeWatcher.loadSnapshot(
             now: now,
             recentDailySpend: recentDailySpend,
             pinnedSessionId: pinnedClaudeSessionId)
-        let codex = await codexAsync ?? Self.sampleCodex(now: now)
-        let claude = await claudeAsync ?? Self.sampleClaude(now: now)
+        let snapshots = await [codexAsync, claudeAsync].compactMap { $0 }
         return UsageOverview(
-            snapshots: [codex, claude],
+            snapshots: snapshots,
             updatedAt: Date())
     }
 
-    private static func sampleCodex(now: Date) -> ProviderUsageSnapshot {
-        let local = CodexSessionWatcher().latestSnapshot()
-        let liveSessions = CodexSessionWatcher().liveSessions(now: now)
-        let surface = CodexSurfaceScanner().scan(
+    public func loadFastOverview(
+        pinnedClaudeSessionId: String? = nil,
+        pinnedCodexSessionId: String? = nil) async -> UsageOverview
+    {
+        let now = Date()
+        async let codexAsync = self.codexFetcher.loadPreviewSnapshot(
             now: now,
-            localSnapshot: local,
-            liveSessions: liveSessions)
-        return local?.providerSnapshot(
-            accountLabel: "Local Codex",
+            pinnedSessionId: pinnedCodexSessionId,
+            preserving: nil)
+        async let claudeAsync = self.claudeWatcher.loadPreviewSnapshot(
             now: now,
-            liveSessions: liveSessions,
-            surface: surface
-        ) ?? ProviderUsageSnapshot(
-            kind: .codex,
-            planName: "Plus",
-            accountLabel: "Local account",
-            projectLabel: "ai-usage-app",
-            windows: [
-                UsageWindow(
-                    id: "codex-session",
-                    title: "5h",
-                    usedPercent: 28,
-                    resetsAt: now.addingTimeInterval(68 * 60)),
-                UsageWindow(
-                    id: "codex-weekly",
-                    title: "Weekly",
-                    usedPercent: 44,
-                    resetsAt: now.addingTimeInterval(2.6 * 24 * 60 * 60)),
-            ],
-            today: DailyUsageStats(
-                requests: 42,
-                inputTokens: 184_200,
-                outputTokens: 61_900,
-                activeMinutes: 96,
-                spend: ProviderSpend(used: 4.80, limit: 25, currencyCode: "USD"),
-                peakHourLabel: "current session"),
-            modelMix: [
-                ModelUsageShare(modelName: "gpt-5.5", percent: 100),
-            ],
-            workContext: nil,
-            codexSession: nil,
-            codexSurface: surface,
-            creditBalance: 18.4,
-            extraSpend: nil,
-            streakDays: 12,
-            updatedAt: now)
+            pinnedSessionId: pinnedClaudeSessionId,
+            preserving: nil)
+        let snapshots = await [codexAsync, claudeAsync].compactMap { $0 }
+        return UsageOverview(
+            snapshots: snapshots,
+            updatedAt: Date())
     }
 
-    private static func sampleClaude(now: Date) -> ProviderUsageSnapshot {
-        ProviderUsageSnapshot(
-            kind: .claude,
-            planName: "Max",
-            accountLabel: "Local account",
-            projectLabel: "design pass",
-            windows: [
-                UsageWindow(
-                    id: "claude-session",
-                    title: "Session",
-                    usedPercent: 63,
-                    resetsAt: now.addingTimeInterval(32 * 60)),
-                UsageWindow(
-                    id: "claude-weekly",
-                    title: "Weekly",
-                    usedPercent: 71,
-                    resetsAt: now.addingTimeInterval(4.1 * 24 * 60 * 60)),
-            ],
-            today: DailyUsageStats(
-                requests: 31,
-                inputTokens: 142_600,
-                outputTokens: 48_300,
-                activeMinutes: 78,
-                spend: ProviderSpend(used: 3.20, limit: 20, currencyCode: "USD"),
-                peakHourLabel: "9-10 AM"),
-            modelMix: [
-                ModelUsageShare(modelName: "opus", percent: 46),
-                ModelUsageShare(modelName: "sonnet", percent: 42),
-                ModelUsageShare(modelName: "haiku", percent: 12),
-            ],
-            creditBalance: nil,
-            extraSpend: ProviderSpend(used: 3.2, limit: 20, currencyCode: "USD"),
-            streakDays: 8,
-            updatedAt: now)
+    private static func replacing(
+        _ provider: ProviderKind,
+        with snapshot: ProviderUsageSnapshot?,
+        in overview: UsageOverview,
+        updatedAt: Date) -> UsageOverview
+    {
+        var snapshots = overview.snapshots.filter { $0.kind != provider }
+        if let snapshot {
+            snapshots.append(snapshot)
+        }
+        let order = Dictionary(uniqueKeysWithValues: ProviderKind.allCases.enumerated().map { ($0.element, $0.offset) })
+        snapshots.sort { (order[$0.kind] ?? 99) < (order[$1.kind] ?? 99) }
+        return UsageOverview(snapshots: snapshots, updatedAt: updatedAt)
     }
+
 }
 
 private struct CodexUsageFetcher {
-    func loadSnapshot(now: Date) async -> ProviderUsageSnapshot? {
+    func loadSnapshot(now: Date, pinnedSessionId: String? = nil) async -> ProviderUsageSnapshot? {
         let watcher = CodexSessionWatcher()
-        let local = watcher.latestSnapshot()
+        let local = watcher.latestSnapshot(pinnedSessionId: pinnedSessionId, fast: true)
         let liveSessions = watcher.liveSessions(now: now)
         let surface = CodexSurfaceScanner().scan(
             now: now,
@@ -145,6 +122,22 @@ private struct CodexUsageFetcher {
             extraSpend: nil,
             streakDays: 0,
             updatedAt: now)
+    }
+
+    func loadPreviewSnapshot(
+        now: Date,
+        pinnedSessionId: String?,
+        preserving base: ProviderUsageSnapshot?) async -> ProviderUsageSnapshot?
+    {
+        let watcher = CodexSessionWatcher()
+        let local = watcher.latestSnapshot(pinnedSessionId: pinnedSessionId, fast: true)
+        guard let local else { return base }
+        let liveSessions = watcher.liveSessions(now: now)
+        return local.providerSnapshot(
+            accountLabel: base?.accountLabel ?? "Local Codex",
+            now: now,
+            liveSessions: liveSessions.isEmpty ? (base?.liveSessions ?? []) : liveSessions,
+            surface: base?.codexSurface)
     }
 
     private static func remoteUsagePayload() async throws -> CodexUsagePayload {
@@ -229,9 +222,10 @@ private struct CodexUsageFetcher {
 }
 
 private struct CodexSessionWatcher {
-    func latestSnapshot() -> CodexLocalSnapshot? {
-        guard let file = self.latestSessionFile() else { return nil }
-        guard let content = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+    func latestSnapshot(pinnedSessionId: String? = nil, fast: Bool = false) -> CodexLocalSnapshot? {
+        let pinnedFile = pinnedSessionId.flatMap { self.sessionFile(sessionId: $0) }
+        guard let file = pinnedFile ?? self.latestSessionFile() else { return nil }
+        guard let content = Self.sessionText(from: file, fast: fast) else { return nil }
 
         let thread = CodexThreadStore().thread(for: file.path)
         var sessionId = thread?.sessionId
@@ -241,7 +235,7 @@ private struct CodexSessionWatcher {
         var tokenSamples: [TokenSample] = []
         var firstDate: Date?
         var latestDate = thread?.updatedAt ?? Date()
-        var latestRateLimit: LocalRateLimit?
+        var observedRateLimits: [LocalRateLimit] = []
         var toolCalls = 0
         var shellCommands = 0
         var patchEvents = 0
@@ -341,11 +335,14 @@ private struct CodexSessionWatcher {
             }
 
             if payloadType == "token_count" {
-                latestRateLimit = Self.rateLimit(from: payload) ?? latestRateLimit
+                if let rateLimit = Self.rateLimit(from: payload) {
+                    observedRateLimits.append(rateLimit)
+                }
 
                 guard let info = payload["info"] as? [String: Any],
                       let lastUsage = info["last_token_usage"] as? [String: Any]
                 else { continue }
+                let totalUsage = info["total_token_usage"] as? [String: Any]
 
                 modelName = info["model"] as? String ?? modelName
                 let used = Self.int(lastUsage["total_tokens"])
@@ -353,6 +350,10 @@ private struct CodexSessionWatcher {
                 let output = Self.int(lastUsage["output_tokens"])
                 let cached = Self.int(lastUsage["cached_input_tokens"] ?? lastUsage["cache_read_input_tokens"])
                 let reasoning = Self.int(lastUsage["reasoning_output_tokens"])
+                let cumulativeInput = Self.int(totalUsage?["input_tokens"])
+                let cumulativeOutput = Self.int(totalUsage?["output_tokens"])
+                let cumulativeCached = Self.int(totalUsage?["cached_input_tokens"] ?? totalUsage?["cache_read_input_tokens"])
+                let cumulativeReasoning = Self.int(totalUsage?["reasoning_output_tokens"])
                 let contextWindow = Self.int(info["model_context_window"])
                 if used > 0, contextWindow > 0 {
                     let turnTokens = input + output
@@ -373,17 +374,30 @@ private struct CodexSessionWatcher {
                             output: output,
                             cached: cached,
                             reasoning: reasoning,
+                            cumulativeInput: cumulativeInput,
+                            cumulativeOutput: cumulativeOutput,
+                            cumulativeCached: cumulativeCached,
+                            cumulativeReasoning: cumulativeReasoning,
                             contextWindow: contextWindow))
                 }
             }
         }
 
         guard let latest = tokenSamples.last else { return nil }
+        let mergedRateLimit = Self.mergeRateLimits(observedRateLimits)
 
-        let totalInput = tokenSamples.reduce(0) { $0 + $1.input }
-        let totalOutput = tokenSamples.reduce(0) { $0 + $1.output }
-        let totalCached = tokenSamples.reduce(0) { $0 + $1.cached }
-        let totalReasoning = tokenSamples.reduce(0) { $0 + $1.reasoning }
+        let totalInput = latest.cumulativeInput > 0
+            ? latest.cumulativeInput
+            : tokenSamples.reduce(0) { $0 + $1.input }
+        let totalOutput = latest.cumulativeOutput > 0
+            ? latest.cumulativeOutput
+            : tokenSamples.reduce(0) { $0 + $1.output }
+        let totalCached = latest.cumulativeCached > 0
+            ? latest.cumulativeCached
+            : tokenSamples.reduce(0) { $0 + $1.cached }
+        let totalReasoning = latest.cumulativeReasoning > 0
+            ? latest.cumulativeReasoning
+            : tokenSamples.reduce(0) { $0 + $1.reasoning }
         // Per-turn growth = mean of positive deltas in `used` tokens
         // (filters compactions, since those produce negatives). Returns
         // nil when no positive deltas exist yet — we deliberately do NOT
@@ -413,7 +427,7 @@ private struct CodexSessionWatcher {
         let insight = Self.insight(
             context: context,
             latest: latest,
-            windows: latestRateLimit?.windows ?? [],
+            windows: mergedRateLimit?.windows ?? [],
             totalInput: totalInput,
             totalCached: totalCached,
             totalOutput: totalOutput,
@@ -455,7 +469,7 @@ private struct CodexSessionWatcher {
             flightEvents: curatedFlightEvents,
             biggestBurnEvent: biggestBurnEvent)
 
-        let windows = latestRateLimit?.windows ?? []
+        let windows = mergedRateLimit?.windows ?? []
         let modelMix = modelName.map { [ModelUsageShare(modelName: $0, percent: 100)] } ?? []
         let memory = CodexHistoryStore().record(
             sessionId: sessionId ?? file.lastPathComponent,
@@ -469,8 +483,8 @@ private struct CodexSessionWatcher {
             context: context,
             codexSession: codexSession,
             windows: windows,
-            planName: latestRateLimit?.planName,
-            creditBalance: latestRateLimit?.creditBalance,
+            planName: mergedRateLimit?.planName,
+            creditBalance: mergedRateLimit?.creditBalance,
             projectLabel: project,
             memory: memory,
             today: DailyUsageStats(
@@ -481,6 +495,35 @@ private struct CodexSessionWatcher {
                 spend: nil,
                 peakHourLabel: "current session"),
             modelMix: modelMix)
+    }
+
+    private static func sessionText(from url: URL, fast: Bool) -> String? {
+        if !fast {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let headBytes = 64 * 1024
+        let tailBytes = 1_500_000
+        if fileSize <= headBytes + tailBytes {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        let headData = (try? handle.read(upToCount: headBytes)) ?? Data()
+        let tailOffset = UInt64(max(0, fileSize - tailBytes))
+        do {
+            try handle.seek(toOffset: tailOffset)
+        } catch {
+            return String(data: headData, encoding: .utf8)
+        }
+        let tailData = (try? handle.readToEnd()) ?? Data()
+
+        let head = String(data: headData, encoding: .utf8) ?? ""
+        let tail = String(data: tailData, encoding: .utf8) ?? ""
+        return head + "\n" + tail
     }
 
     private static func insight(
@@ -624,11 +667,31 @@ private struct CodexSessionWatcher {
         return candidates.max { $0.modified < $1.modified }?.url
     }
 
+    private func sessionFile(sessionId: String) -> URL? {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return nil }
+
+        for case let url as URL in enumerator
+        where url.pathExtension == "jsonl"
+        {
+            let filenameId = url.deletingPathExtension().lastPathComponent
+            let canonicalId = Self.rolloutSessionId(from: url)
+            if filenameId == sessionId || canonicalId == sessionId {
+                return url
+            }
+        }
+        return nil
+    }
+
     /// All Codex jsonl session files modified within `thresholdSeconds`,
     /// converted to `LiveSession` records. Project name is extracted by
     /// reading the leading `session_meta`/`turn_context` payload of each
     /// file (the cwd lives there). Falls back to the filename basename.
-    func liveSessions(now: Date, thresholdSeconds: TimeInterval = 600) -> [LiveSession] {
+    func liveSessions(now: Date, thresholdSeconds: TimeInterval = 1_800) -> [LiveSession] {
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
         guard let enumerator = FileManager.default.enumerator(
             at: root,
@@ -644,13 +707,30 @@ private struct CodexSessionWatcher {
             else { continue }
             let projectName = Self.extractProjectName(from: url)
                 ?? url.deletingPathExtension().lastPathComponent
-            let sessionId = url.deletingPathExtension().lastPathComponent
+            let metadata = CodexThreadStore().thread(for: url.path)
+            let sessionId = metadata?.sessionId
+                ?? Self.rolloutSessionId(from: url)
+                ?? url.deletingPathExtension().lastPathComponent
+            let displayName = Self.cleanDisplayName(metadata?.title)
+                ?? Self.extractFirstUserMessage(from: url)
             live.append(LiveSession(
                 sessionId: sessionId,
                 projectName: projectName,
-                lastActivityAt: mtime))
+                lastActivityAt: mtime,
+                displayName: displayName))
         }
         return live.sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    private static func rolloutSessionId(from url: URL) -> String? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.count >= 36 else { return nil }
+        let suffix = String(name.suffix(36))
+        let pattern = #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#
+        guard suffix.range(of: pattern, options: .regularExpression) != nil else {
+            return nil
+        }
+        return suffix
     }
 
     private static func extractProjectName(from url: URL) -> String? {
@@ -675,14 +755,65 @@ private struct CodexSessionWatcher {
         return nil
     }
 
+    private static func extractFirstUserMessage(from url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 256 * 1024),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+
+        var inspected = 0
+        for line in text.split(separator: "\n") {
+            inspected += 1
+            if inspected > 220 { break }
+            guard let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let payload = obj["payload"] as? [String: Any],
+                  payload["type"] as? String == "user_message"
+            else { continue }
+            let text = Self.string(fromMessagePayload: payload)
+            if let cleaned = Self.cleanDisplayName(text) {
+                return cleaned
+            }
+        }
+        return nil
+    }
+
+    private static func string(fromMessagePayload payload: [String: Any]) -> String? {
+        if let text = payload["text"] as? String { return text }
+        if let message = payload["message"] as? String { return message }
+        if let text = payload["content"] as? String { return text }
+        if let content = payload["content"] as? [[String: Any]] {
+            return content.compactMap { item in
+                item["text"] as? String
+            }.joined(separator: " ")
+        }
+        return nil
+    }
+
+    private static func cleanDisplayName(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !collapsed.isEmpty,
+              !collapsed.hasPrefix("/"),
+              !collapsed.lowercased().contains("<environment_context>")
+        else { return nil }
+        if collapsed.count <= 72 { return collapsed }
+        return String(collapsed.prefix(71)) + "…"
+    }
+
     private static func rateLimit(from payload: [String: Any]) -> LocalRateLimit? {
         guard let rateLimits = payload["rate_limits"] as? [String: Any] else { return nil }
 
+        let limitID = (rateLimits["limit_id"] as? String) ?? "codex"
+        let limitName = rateLimits["limit_name"] as? String
         var windows: [UsageWindow] = []
         if let primary = rateLimits["primary"] as? [String: Any] {
             windows.append(
                 UsageWindow(
-                    id: "codex-local-primary",
+                    id: "codex-local-\(limitID)-primary",
                     title: Self.windowTitle(minutes: Self.int(primary["window_minutes"])) ?? "5h",
                     usedPercent: Self.double(primary["used_percent"]),
                     resetsAt: Self.date(fromUnixSeconds: Self.int(primary["resets_at"]))))
@@ -691,7 +822,7 @@ private struct CodexSessionWatcher {
         if let secondary = rateLimits["secondary"] as? [String: Any] {
             windows.append(
                 UsageWindow(
-                    id: "codex-local-weekly",
+                    id: "codex-local-\(limitID)-weekly",
                     title: Self.windowTitle(minutes: Self.int(secondary["window_minutes"])) ?? "Weekly",
                     usedPercent: Self.double(secondary["used_percent"]),
                     resetsAt: Self.date(fromUnixSeconds: Self.int(secondary["resets_at"]))))
@@ -699,9 +830,66 @@ private struct CodexSessionWatcher {
 
         let credits = rateLimits["credits"] as? [String: Any]
         return LocalRateLimit(
+            limitID: limitID,
+            limitName: limitName,
             windows: windows,
             planName: (rateLimits["plan_type"] as? String).map(CodexUsageFetcher.displayPlan),
             creditBalance: Double(credits?["balance"] as? String ?? ""))
+    }
+
+    private static func mergeRateLimits(_ limits: [LocalRateLimit]) -> LocalRateLimit? {
+        guard !limits.isEmpty else { return nil }
+        let allWindows = limits.flatMap(\.windows)
+        let primary = Self.mostConstrainedWindow(
+            in: allWindows,
+            id: "codex-local-primary",
+            title: "5h",
+            matching: { window in
+                let title = window.title.lowercased()
+                return !title.contains("weekly")
+                    && !title.contains("week")
+                    && !title.contains("7d")
+            })
+        let weekly = Self.mostConstrainedWindow(
+            in: allWindows,
+            id: "codex-local-weekly",
+            title: "Weekly",
+            matching: { window in
+                let title = window.title.lowercased()
+                return title.contains("weekly")
+                    || title.contains("week")
+                    || title.contains("7d")
+            })
+        let planName = limits.compactMap(\.planName).last
+        let creditBalance = limits.compactMap(\.creditBalance).last
+        return LocalRateLimit(
+            limitID: "codex-merged",
+            limitName: nil,
+            windows: [primary, weekly].compactMap { $0 },
+            planName: planName,
+            creditBalance: creditBalance)
+    }
+
+    private static func mostConstrainedWindow(
+        in windows: [UsageWindow],
+        id: String,
+        title: String,
+        matching predicate: (UsageWindow) -> Bool) -> UsageWindow?
+    {
+        let candidates = windows.filter(predicate)
+        guard let strongest = candidates.max(by: { lhs, rhs in
+            if lhs.usedPercent == rhs.usedPercent {
+                let lhsReset = lhs.resetsAt ?? .distantFuture
+                let rhsReset = rhs.resetsAt ?? .distantFuture
+                return lhsReset > rhsReset
+            }
+            return lhs.usedPercent < rhs.usedPercent
+        }) else { return nil }
+        return UsageWindow(
+            id: id,
+            title: title,
+            usedPercent: strongest.usedPercent,
+            resetsAt: strongest.resetsAt)
     }
 
     private static func windowTitle(minutes: Int) -> String? {
@@ -798,6 +986,10 @@ private struct CodexSessionWatcher {
         let output: Int
         let cached: Int
         let reasoning: Int
+        let cumulativeInput: Int
+        let cumulativeOutput: Int
+        let cumulativeCached: Int
+        let cumulativeReasoning: Int
         let contextWindow: Int
     }
 }
@@ -1236,7 +1428,7 @@ private struct CodexSurfaceScanner {
         var compactions = 0
 
         for file in files {
-            guard let content = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            guard let content = Self.boundedText(from: file, maxBytes: 512 * 1024) else { continue }
             for line in content.split(separator: "\n") {
                 guard let data = line.data(using: .utf8),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -1285,6 +1477,22 @@ private struct CodexSurfaceScanner {
             .map(\.url)
     }
 
+    private static func boundedText(from url: URL, maxBytes: Int) -> String? {
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard fileSize > maxBytes else {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: UInt64(max(0, fileSize - maxBytes)))
+        } catch {
+            return nil
+        }
+        let data = (try? handle.readToEnd()) ?? Data()
+        return String(data: data, encoding: .utf8)
+    }
+
     private func sqliteRows(_ db: URL, query: String) -> [[String]] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
@@ -1292,21 +1500,20 @@ private struct CodexSurfaceScanner {
 
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return [] }
+            guard let string = String(data: data, encoding: .utf8) else { return [] }
+            return string
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).components(separatedBy: "\t") }
         } catch {
             return []
         }
-
-        guard process.terminationStatus == 0 else { return [] }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        guard let string = String(data: data, encoding: .utf8) else { return [] }
-        return string
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { String($0).components(separatedBy: "\t") }
     }
 
     private func countFiles(in root: URL, pathExtension: String) -> Int {
@@ -1489,6 +1696,8 @@ private struct CodexHistoryStore {
 }
 
 private struct LocalRateLimit {
+    let limitID: String
+    let limitName: String?
     let windows: [UsageWindow]
     let planName: String?
     let creditBalance: Double?
@@ -1500,7 +1709,19 @@ private struct CodexThreadStore {
         guard FileManager.default.fileExists(atPath: db.path) else { return nil }
 
         let query = """
-        select id,title,cwd,coalesce(model,''),coalesce(reasoning_effort,''),coalesce(git_branch,''),source,tokens_used,coalesce(updated_at_ms,updated_at * 1000),coalesce(cli_version,''),approval_mode,sandbox_policy
+        select
+          id,
+          title,
+          cwd,
+          coalesce(model,'') as model,
+          coalesce(reasoning_effort,'') as reasoning_effort,
+          coalesce(git_branch,'') as git_branch,
+          source,
+          tokens_used,
+          coalesce(updated_at_ms,updated_at * 1000) as updated_at_ms,
+          coalesce(cli_version,'') as cli_version,
+          approval_mode,
+          sandbox_policy
         from threads
         where rollout_path=\(Self.sqlQuote(rolloutPath))
         order by updated_at_ms desc
@@ -1509,58 +1730,87 @@ private struct CodexThreadStore {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = ["-readonly", "-tabs", db.path, query]
+        process.arguments = ["-readonly", "-json", db.path, query]
 
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            guard let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let row = rows.first
+            else { return nil }
+
+            return ThreadMetadata(
+                sessionId: Self.string(row["id"]),
+                title: Self.string(row["title"]),
+                cwd: Self.string(row["cwd"]),
+                model: Self.string(row["model"]),
+                reasoningEffort: Self.string(row["reasoning_effort"]),
+                gitBranch: Self.string(row["git_branch"]),
+                source: Self.string(row["source"]),
+                tokensUsed: Self.int(row["tokens_used"]),
+                updatedAt: Self.date(fromMilliseconds: row["updated_at_ms"]),
+                cliVersion: Self.string(row["cli_version"]),
+                approvalMode: Self.string(row["approval_mode"]),
+                sandboxLabel: Self.sandboxLabel(from: Self.string(row["sandbox_policy"])))
         } catch {
             return nil
         }
-
-        guard process.terminationStatus == 0 else { return nil }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        guard let line = String(data: data, encoding: .utf8)?
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .first
-        else { return nil }
-
-        let fields = String(line).components(separatedBy: "\t")
-        guard fields.count >= 12 else { return nil }
-
-        return ThreadMetadata(
-            sessionId: Self.nilIfEmpty(fields[0]),
-            title: Self.nilIfEmpty(fields[1]),
-            cwd: Self.nilIfEmpty(fields[2]),
-            model: Self.nilIfEmpty(fields[3]),
-            reasoningEffort: Self.nilIfEmpty(fields[4]),
-            gitBranch: Self.nilIfEmpty(fields[5]),
-            source: Self.nilIfEmpty(fields[6]),
-            tokensUsed: Int(fields[7]) ?? 0,
-            updatedAt: Self.date(fromMilliseconds: fields[8]),
-            cliVersion: Self.nilIfEmpty(fields[9]),
-            approvalMode: Self.nilIfEmpty(fields[10]),
-            sandboxLabel: Self.sandboxLabel(from: fields[11]))
     }
 
     private static func sqlQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
-    private static func nilIfEmpty(_ value: String) -> String? {
-        value.isEmpty ? nil : value
+    private static func string(_ value: Any?) -> String? {
+        switch value {
+        case let text as String:
+            return text.isEmpty ? nil : text
+        case let number as NSNumber:
+            return number.stringValue
+        default:
+            return nil
+        }
     }
 
-    private static func date(fromMilliseconds value: String) -> Date? {
-        guard let milliseconds = Double(value), milliseconds > 0 else { return nil }
+    private static func int(_ value: Any?) -> Int {
+        switch value {
+        case let int as Int:
+            return int
+        case let number as NSNumber:
+            return number.intValue
+        case let text as String:
+            return Int(text) ?? 0
+        default:
+            return 0
+        }
+    }
+
+    private static func date(fromMilliseconds value: Any?) -> Date? {
+        let milliseconds: Double
+        switch value {
+        case let double as Double:
+            milliseconds = double
+        case let int as Int:
+            milliseconds = Double(int)
+        case let number as NSNumber:
+            milliseconds = number.doubleValue
+        case let text as String:
+            milliseconds = Double(text) ?? 0
+        default:
+            milliseconds = 0
+        }
+        guard milliseconds > 0 else { return nil }
         return Date(timeIntervalSince1970: milliseconds / 1_000)
     }
 
-    private static func sandboxLabel(from raw: String) -> String? {
+    private static func sandboxLabel(from raw: String?) -> String? {
+        guard let raw else { return nil }
         if raw.contains("danger-full-access") { return "full access" }
         if raw.contains("workspace-write") { return "workspace write" }
         if raw.contains("read-only") { return "read only" }

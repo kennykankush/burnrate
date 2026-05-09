@@ -126,24 +126,42 @@ public actor ClaudeOAuthUsageFetcher {
     public init() {}
 
     public func fetch(credentials: ClaudeOAuthCredentials) async -> ClaudeOAuthUsage? {
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 8
-        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("burnrate/0.1 (claude-code/2.1)", forHTTPHeaderField: "User-Agent")
+        await Self.withTimeout(milliseconds: 2_000) {
+            var request = URLRequest(url: Self.endpoint)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 2
+            request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+            request.setValue("burnrate/0.1 (claude-code/2.1)", forHTTPHeaderField: "User-Agent")
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                    return nil
+                }
+                let raw = try JSONDecoder().decode(OAuthUsageRaw.self, from: data)
+                return Self.decode(raw, subscriptionType: credentials.subscriptionType)
+            } catch {
                 return nil
             }
-            let raw = try JSONDecoder().decode(OAuthUsageRaw.self, from: data)
-            return Self.decode(raw, subscriptionType: credentials.subscriptionType)
-        } catch {
-            return nil
+        }
+    }
+
+    private static func withTimeout<T>(
+        milliseconds: Int,
+        operation: @escaping @Sendable () async -> T?) async -> T?
+    {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await operation() }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(milliseconds))
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
         }
     }
 

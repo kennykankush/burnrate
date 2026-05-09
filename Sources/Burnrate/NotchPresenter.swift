@@ -101,48 +101,6 @@ private enum NotchPalette {
     }
 }
 
-// MARK: - Tool taxonomy
-
-/// The hover-switchable tools that live inside the open alcove. Each
-/// is a distinct product story: current pace, patterns, wrap, and health.
-/// The strip across the top of the alcove uses mouse-hover (not click)
-/// to switch between them.
-enum NotchTool: String, CaseIterable, Identifiable {
-    /// The complete "right now" picture — context %, 5h burst, weekly
-    /// as a ring trio, advisor WHY/WHEN block, and the runway bar.
-    /// Compresses the menu bar's NOW tab into a single dense surface.
-    case now
-    /// Patterns — chronotype, model mix, leaderboards, diagnostics.
-    /// Mirrors the menu bar's Patterns tab.
-    case patterns
-    /// Wrap — aggregate strip, cost over time, last 30d sparkline,
-    /// hero feature cards. Mirrors the menu bar's Wrap tab.
-    case wrap
-    /// Health — system status, today's hourly breakdown, language
-    /// pills, tool histogram. Mirrors the menu bar's Health tab.
-    case health
-
-    var id: String { self.rawValue }
-
-    var label: String {
-        switch self {
-        case .now: "NOW"
-        case .patterns: "PATTERNS"
-        case .wrap: "WRAP"
-        case .health: "HEALTH"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .now: "bolt.fill"
-        case .patterns: "square.grid.2x2"
-        case .wrap: "calendar"
-        case .health: "stethoscope"
-        }
-    }
-}
-
 struct NotchThresholdAlert: Equatable, Identifiable {
     let id: String
     let title: String
@@ -299,6 +257,11 @@ final class NotchDisplayState {
     /// chips and footer row to give the user context for the burn.
     var modelLabel: String? = nil
     var gitBranch: String? = nil
+    /// Human identity for the context being measured. This is the
+    /// missing "what am I looking at?" layer: renamed Claude session /
+    /// Codex thread title first, folder/model/branch as secondary proof.
+    var contextIdentityTitle: String = "No live thread"
+    var contextIdentityDetail: String = ""
 
     /// Pace tool
     var contextPercent: Double = 0
@@ -307,6 +270,20 @@ final class NotchDisplayState {
     var verdictTitle: String = ""
     var verdictDetail: String = ""
     var verdictPattern: String = ""
+
+    /// Runway-first decision copy. The notch should answer "can I keep
+    /// working?" before it explains the raw meters.
+    var runwayValue: String = "—"
+    var runwayUnit: String = "no live thread"
+    var runwayTitle: String = "No live thread"
+    var nextAction: String = "Open Claude Code or Codex to begin tracking."
+    var bottleneckLabel: String = "IDLE"
+    var bottleneckDetail: String = "waiting for a live context"
+    var bottleneckTone: UsageTone = .calm
+    var lastTurnImpactValue: String = "—"
+    var lastTurnImpactDetail: String = "waiting for next turn"
+    var lastTurnImpactTone: UsageTone = .calm
+    var capSummary: String = "caps unavailable"
 
     /// Windows tool
     var fiveHour: AlcoveWindow? = nil
@@ -412,6 +389,7 @@ final class NotchDisplayState {
     /// glance at the menu bar and notice things are heating up without
     /// hovering. Nil = nothing painted.
     var ambientCueColor: Color? = nil
+    var ambientCueLabel: String? = nil
     var thresholdAlert: NotchThresholdAlert? = nil
 
     struct AlcoveWindow: Equatable {
@@ -427,10 +405,18 @@ final class NotchDisplayState {
     }
 
     struct WindowForecastSummary: Equatable {
+        let paceDeltaPercent: Double
         let aheadOfPacePercent: Double
+        let fairPaceReservePercent: Double
         let projectedAtResetPercent: Double?
+        let projectedReservePercent: Double?
         let runsOutAt: Date?
         let runsOutText: String?
+
+        var projectedOverPercent: Int? {
+            guard let projectedAtResetPercent, projectedAtResetPercent > 100 else { return nil }
+            return max(1, Int((projectedAtResetPercent - 100).rounded()))
+        }
     }
 
     func update(from model: MenuBarModel) {
@@ -447,6 +433,9 @@ final class NotchDisplayState {
                 ?? snapshot?.workContext?.modelName)
         self.gitBranch = snapshot?.claudeSession?.gitBranch
             ?? snapshot?.codexSession?.gitBranch
+        let identity = Self.contextIdentity(from: snapshot)
+        self.contextIdentityTitle = identity.title
+        self.contextIdentityDetail = identity.detail
 
         // PACE
         if let context = snapshot?.workContext {
@@ -550,30 +539,32 @@ final class NotchDisplayState {
             self.projectedMonthSpend = nil
         }
 
-        // Cost section — compute synthetic cost for today's specific input/output
-        // breakdown using the pricing of the currently active model. Falls back
-        // to the most heavily used model in the mix if no session is active.
+        // Cost section — estimate retail API-equivalent spend. Today uses
+        // the observed 30d/lifetime effective rate when available instead
+        // of assuming zero cache reads, which would badly overstate Claude
+        // Code sessions that replay most context from cache.
         if let agg = snapshot?.claudeAggregate {
-            let activeModel = snapshot?.claudeSession?.modelName
-                ?? agg.modelMix.first?.modelName
-                ?? "sonnet"
-
-            if let today = snapshot?.today, today.totalTokens > 0 {
-                self.syntheticCostToday = ClaudePricing.synthesizeUSD(
-                    model: activeModel,
-                    input: today.inputTokens,
-                    output: today.outputTokens,
-                    cacheRead: 0,
-                    cacheCreate: 0
-                )
-            } else {
-                self.syntheticCostToday = nil
-            }
-
             let lifetimeTokens = agg.lifetimeInputTokens
                 + agg.lifetimeOutputTokens
                 + agg.lifetimeCacheReadTokens
                 + agg.lifetimeCacheCreationTokens
+
+            if let today = snapshot?.today, today.totalTokens > 0 {
+                if agg.lastThirtyDayCostUSD > 0, agg.lastThirtyDayTokens > 0 {
+                    self.syntheticCostToday = Double(today.totalTokens)
+                        * agg.lastThirtyDayCostUSD
+                        / Double(agg.lastThirtyDayTokens)
+                } else if agg.lifetimeSyntheticCostUSD > 0, lifetimeTokens > 0 {
+                    self.syntheticCostToday = Double(today.totalTokens)
+                        * agg.lifetimeSyntheticCostUSD
+                        / Double(lifetimeTokens)
+                } else {
+                    self.syntheticCostToday = nil
+                }
+            } else {
+                self.syntheticCostToday = nil
+            }
+
             self.cost30d = agg.lastThirtyDayCostUSD > 0 ? agg.lastThirtyDayCostUSD : nil
             self.tokens30d = agg.lastThirtyDayTokens
             self.costLifetime = agg.lifetimeSyntheticCostUSD > 0 ? agg.lifetimeSyntheticCostUSD : nil
@@ -696,21 +687,159 @@ final class NotchDisplayState {
             self.depletedClock = nil
         }
 
+        self.applyDecisionCopy(from: snapshot, model: model)
+
         // Ambient cue — only painted when something's actually warm. Below
         // 75% the closed notch stays untouched (NotchNook-style: empty
         // unless there's a reason to interrupt).
         if self.depletedTitle != nil {
             self.ambientCueColor = NotchPalette.danger
+            self.ambientCueLabel = "WAIT"
         } else if self.contextPercent >= 75 {
             self.ambientCueColor = NotchPalette.tone(self.contextTone)
+            self.ambientCueLabel = self.contextPercent >= 86 ? "TIGHT" : "WARM"
         } else if let f = self.fiveHour, f.percent >= 75 {
             self.ambientCueColor = NotchPalette.tone(f.tone)
+            self.ambientCueLabel = "5H"
         } else if let w = self.weekly, w.percent >= 85 {
             self.ambientCueColor = NotchPalette.tone(w.tone)
+            self.ambientCueLabel = "7D"
+        } else if self.liveSessionCount > 0 {
+            self.ambientCueColor = NotchPalette.live
+            self.ambientCueLabel = "LIVE"
         } else {
             self.ambientCueColor = nil
+            self.ambientCueLabel = nil
         }
         self.thresholdAlert = self.computeThresholdAlert()
+    }
+
+    private func applyDecisionCopy(from snapshot: ProviderUsageSnapshot?, model: MenuBarModel) {
+        guard let snapshot, let context = snapshot.workContext else {
+            self.runwayValue = "—"
+            self.runwayUnit = "no live thread"
+            self.runwayTitle = "No live thread"
+            self.nextAction = "Open Claude Code or Codex to begin tracking."
+            self.bottleneckLabel = "IDLE"
+            self.bottleneckDetail = "waiting for a live context"
+            self.bottleneckTone = .calm
+            self.lastTurnImpactValue = "—"
+            self.lastTurnImpactDetail = "waiting for next turn"
+            self.lastTurnImpactTone = .calm
+            self.capSummary = "caps unavailable"
+            return
+        }
+
+        let pattern = model.turnPattern(
+            forSessionId: context.sessionId,
+            provider: snapshot.kind)
+        let remaining = context.contextRemainingTokens
+        let turnsLeft = pattern.avg > 0
+            ? max(0, remaining / pattern.avg)
+            : context.estimatedMessagesRemaining
+        let mediumSize = pattern.avg > 0
+            ? max(6_000, pattern.avg)
+            : WorkContextSnapshot.RoomFor.mediumSize
+        let largeSize: Int = {
+            guard pattern.avg > 0 else { return WorkContextSnapshot.RoomFor.largeSize }
+            return max(20_000, max(pattern.p90, Int(Double(pattern.avg) * 2.5)))
+        }()
+        let mediumFits = max(0, remaining / mediumSize)
+        let largeFits = max(0, remaining / largeSize)
+
+        if self.depletedTitle != nil {
+            self.runwayValue = self.depletedCountdown ?? "wait"
+            self.runwayUnit = self.depletedClock ?? "until reset"
+            self.runwayTitle = "Window is depleted"
+            self.nextAction = "Wait for reset before spending another heavy turn."
+        } else if let turnsLeft {
+            self.runwayValue = "\(turnsLeft)"
+            self.runwayUnit = turnsLeft == 1 ? "turn left" : "turns left"
+            if turnsLeft <= 0 {
+                self.runwayTitle = "No average turn fits"
+            } else if largeFits > 0 {
+                self.runwayTitle = "Good for one big ask"
+            } else if mediumFits > 0 {
+                self.runwayTitle = "Good for focused work"
+            } else {
+                self.runwayTitle = "Compact before heavy work"
+            }
+        } else {
+            self.runwayValue = "\(Int(context.contextRemainingPercent.rounded()))%"
+            self.runwayUnit = "context left"
+            self.runwayTitle = context.contextUsedPercent >= 86
+                ? "Context is tight"
+                : "Learning this thread"
+        }
+
+        let capParts = [
+            self.fiveHour.map { "5h \(Int($0.percent.rounded()))%" },
+            self.weekly.map { "7d \(Int($0.percent.rounded()))%" },
+        ].compactMap { $0 }
+        self.capSummary = capParts.isEmpty ? "caps unavailable" : capParts.joined(separator: " · ")
+
+        let fivePercent = self.fiveHour?.percent ?? 0
+        let weeklyPercent = self.weekly?.percent ?? 0
+        if let fiveHour = self.fiveHour, fivePercent >= 85, fivePercent >= context.contextUsedPercent {
+            self.bottleneckLabel = "5H CAP"
+            self.bottleneckDetail = "\(Int(fiveHour.percent.rounded()))% used · reset \(fiveHour.resetText)"
+            self.bottleneckTone = fiveHour.tone
+        } else if let weekly = self.weekly, weeklyPercent >= 92, weeklyPercent >= context.contextUsedPercent {
+            self.bottleneckLabel = "7D CAP"
+            self.bottleneckDetail = "\(Int(weekly.percent.rounded()))% used · reset \(weekly.resetText)"
+            self.bottleneckTone = weekly.tone
+        } else if context.contextUsedPercent >= 70 {
+            self.bottleneckLabel = "CONTEXT"
+            self.bottleneckDetail = "\(Int(context.contextUsedPercent.rounded()))% used · \(compactTokens(remaining)) left"
+            self.bottleneckTone = UsageTone(percent: context.contextUsedPercent)
+        } else if fivePercent >= 75, let fiveHour = self.fiveHour {
+            self.bottleneckLabel = "5H CAP"
+            self.bottleneckDetail = "\(Int(fiveHour.percent.rounded()))% used · pace the next turns"
+            self.bottleneckTone = fiveHour.tone
+        } else {
+            self.bottleneckLabel = "ROOMY"
+            self.bottleneckDetail = "context and caps are comfortable"
+            self.bottleneckTone = .calm
+        }
+
+        if self.depletedTitle != nil {
+            // nextAction already set by the depleted branch above.
+        } else if self.bottleneckLabel == "5H CAP" {
+            self.nextAction = "Slow down until the burst window cools off."
+        } else if self.bottleneckLabel == "7D CAP" {
+            self.nextAction = "Use smaller asks until the weekly window resets."
+        } else if context.contextUsedPercent >= 86 {
+            self.nextAction = "Compact after this answer."
+        } else if largeFits == 0 {
+            self.nextAction = "Avoid multi-file or architecture asks in this thread."
+        } else if self.hasAdvisor, !self.advisorRecommendation.isEmpty {
+            self.nextAction = self.advisorRecommendation
+        } else {
+            self.nextAction = "Good room for more work."
+        }
+
+        if let lastDelta = pattern.samples.last, lastDelta > 0 {
+            let lastPercent = context.contextWindowTokens > 0
+                ? Double(lastDelta) / Double(context.contextWindowTokens) * 100
+                : 0
+            self.lastTurnImpactValue = "+\(compactTokens(lastDelta))"
+            self.lastTurnImpactDetail = "last turn · \(compactShare(lastPercent))"
+            if lastPercent >= 10 || lastDelta >= 35_000 {
+                self.lastTurnImpactTone = .tight
+            } else if lastPercent >= 5 || lastDelta >= 18_000 {
+                self.lastTurnImpactTone = .watch
+            } else {
+                self.lastTurnImpactTone = .calm
+            }
+        } else if self.advisorLastTurnShare > 0 {
+            self.lastTurnImpactValue = compactShare(self.advisorLastTurnShare)
+            self.lastTurnImpactDetail = "last turn share"
+            self.lastTurnImpactTone = UsageTone(percent: self.advisorLastTurnShare * 4)
+        } else {
+            self.lastTurnImpactValue = "—"
+            self.lastTurnImpactDetail = "waiting for next turn"
+            self.lastTurnImpactTone = .calm
+        }
     }
 
     private func computeThresholdAlert(now: Date = Date()) -> NotchThresholdAlert? {
@@ -740,6 +869,30 @@ final class NotchDisplayState {
                     symbol: "flame.fill",
                     tone: minutes <= 5 ? .tight : .watch)
             }
+        }
+
+        if let forecast = self.fiveHourForecast,
+           let over = forecast.projectedOverPercent,
+           over >= 10
+        {
+            return NotchThresholdAlert(
+                id: "burst-projected-over-\(over / 5 * 5)",
+                title: "5H PACE OVER",
+                detail: "\(over)% over by reset if pace holds.",
+                symbol: "bolt.trianglebadge.exclamationmark.fill",
+                tone: over >= 20 ? .tight : .watch)
+        }
+
+        if let forecast = self.weeklyForecast,
+           let over = forecast.projectedOverPercent,
+           over >= 10
+        {
+            return NotchThresholdAlert(
+                id: "weekly-projected-over-\(over / 5 * 5)",
+                title: "WEEKLY PACE OVER",
+                detail: "\(over)% over by reset if pace holds.",
+                symbol: "calendar.badge.exclamationmark",
+                tone: over >= 20 ? .tight : .watch)
         }
 
         if let fiveHour = self.fiveHour {
@@ -881,8 +1034,11 @@ final class NotchDisplayState {
               let f = model.forecast(for: window)
         else { return nil }
         return WindowForecastSummary(
+            paceDeltaPercent: f.paceDeltaPercent,
             aheadOfPacePercent: f.aheadOfPacePercent,
+            fairPaceReservePercent: f.fairPaceReservePercent,
             projectedAtResetPercent: f.projectedAtResetPercent,
+            projectedReservePercent: f.projectedReservePercent,
             runsOutAt: f.runsOutAt,
             runsOutText: Self.runsOutText(f.runsOutAt))
     }
@@ -966,6 +1122,131 @@ final class NotchDisplayState {
         }
         let plural = pattern.samples.count == 1 ? "" : "s"
         return "pattern: \(pattern.samples.count) turn\(plural)\(trendArrow)"
+    }
+
+    private static func contextIdentity(from snapshot: ProviderUsageSnapshot?) -> (title: String, detail: String) {
+        guard let snapshot else {
+            return ("No live thread", "open Claude Code or Codex")
+        }
+
+        let sessionId = snapshot.workContext?.sessionId
+            ?? snapshot.claudeSession?.sessionId
+        let renamedLiveTitle = sessionId.flatMap { id in
+            snapshot.liveSessions.first(where: { $0.sessionId == id })?.displayName
+        }
+        let liveConversationTitle = Self.firstUseful(
+            snapshot.liveSessions.map(\.displayName))
+        let title: String
+        switch snapshot.kind {
+        case .claude:
+            title = Self.firstConversationTitle([
+                snapshot.claudeSession?.displayName,
+                renamedLiveTitle,
+                snapshot.claudeSession?.firstPrompt,
+                liveConversationTitle
+            ]) ?? "Live Claude Code thread"
+        case .codex:
+            title = Self.firstConversationTitle([
+                renamedLiveTitle,
+                snapshot.codexSession?.threadTitle,
+                liveConversationTitle
+            ]) ?? "Live Codex thread"
+        }
+
+        let model = Self.shortModelLabel(
+            snapshot.claudeSession?.modelName
+                ?? snapshot.workContext?.modelName)
+        let branch = snapshot.claudeSession?.gitBranch
+            ?? snapshot.codexSession?.gitBranch
+        let project = Self.firstUseful([
+            snapshot.projectLabel,
+            snapshot.workContext?.directory.map(Self.lastPathComponent)
+        ])
+
+        let detail = [
+            project,
+            snapshot.kind.displayName,
+            model,
+            branch
+        ]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty && $0 != "—" }
+            .joined(separator: " · ")
+
+        return (Self.truncateIdentity(title, to: 92), detail)
+    }
+
+    private static func firstConversationTitle(_ values: [String?]) -> String? {
+        for value in values {
+            guard let cleaned = Self.cleanIdentity(value),
+                  Self.isConversationIdentity(cleaned)
+            else { continue }
+            return cleaned
+        }
+        return nil
+    }
+
+    private static func firstUseful(_ values: [String?]) -> String? {
+        for value in values {
+            guard let cleaned = Self.cleanIdentity(value), !cleaned.isEmpty else { continue }
+            return cleaned
+        }
+        return nil
+    }
+
+    private static func cleanIdentity(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let cleaned = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty || cleaned == "—" { return nil }
+        return cleaned
+    }
+
+    private static func isConversationIdentity(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        let actionPrefixes = [
+            "editing ",
+            "reading ",
+            "writing ",
+            "running ",
+            "opening ",
+            "checking "
+        ]
+        if actionPrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return false
+        }
+        let generatedSummaryPrefixes = [
+            "user wanted ",
+            "user asked ",
+            "user requested "
+        ]
+        if generatedSummaryPrefixes.contains(where: { lower.hasPrefix($0) }) {
+            return false
+        }
+
+        let lastWord = value
+            .split(separator: " ")
+            .last
+            .map(String.init) ?? value
+        let fileExtensions = [
+            "md", "txt", "json", "jsonl", "swift", "ts", "tsx", "js", "jsx",
+            "css", "html", "py", "rb", "go", "rs", "toml", "yaml", "yml"
+        ]
+        let ext = URL(fileURLWithPath: lastWord).pathExtension.lowercased()
+        if !ext.isEmpty, fileExtensions.contains(ext) {
+            return false
+        }
+        return true
+    }
+
+    private static func lastPathComponent(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private static func truncateIdentity(_ value: String, to limit: Int) -> String {
+        guard value.count > limit else { return value }
+        return String(value.prefix(max(1, limit - 1))) + "…"
     }
 
     // MARK: - Time helpers
@@ -1126,7 +1407,7 @@ private struct NotchMorphHost: View {
     /// measured content via ContentSizeKey, so this is just the
     /// safety ceiling — content beyond this will be clipped, but in
     /// practice the natural fit lands well below it.
-    static let maxDrawerHeight: CGFloat = 420
+    static let maxDrawerHeight: CGFloat = 520
     /// Floor on the open height so very-empty states don't collapse
     /// into a sliver before the snapshot has populated.
     static let minOpenHeight: CGFloat = 140
@@ -1163,6 +1444,20 @@ private struct NotchMorphHost: View {
             removal: .opacity
                 .animation(.easeIn(duration: 0.06))
         )
+    }
+
+    private var alertTransition: AnyTransition {
+        if self.reduceMotion {
+            return .opacity.animation(.linear(duration: 0.05))
+        }
+
+        return .asymmetric(
+            insertion: .opacity
+                .combined(with: .scale(scale: 0.94, anchor: .top))
+                .combined(with: .offset(y: -10)),
+            removal: .opacity
+                .combined(with: .scale(scale: 0.98, anchor: .top))
+                .combined(with: .offset(y: -6)))
     }
 
     var body: some View {
@@ -1238,6 +1533,18 @@ private struct NotchMorphHost: View {
                             .gesture(self.makeDragGesture(rightSide: false))
                     }
                 }
+                .overlay(alignment: .center) {
+                    if !self.isHovering, !self.isCalibrating,
+                       let label = self.state.ambientCueLabel,
+                       let cue = self.state.ambientCueColor
+                    {
+                        ClosedNotchCue(label: label, color: cue)
+                            .frame(maxWidth: max(42, self.notchWidth - 28))
+                            .offset(y: min(2, self.notchHeight * 0.08))
+                            .transition(.opacity.animation(.easeOut(duration: 0.20)))
+                            .allowsHitTesting(false)
+                    }
+                }
                 .overlay(alignment: .bottom) {
                     // Closed-state ambient hairline. Sits inside the
                     // bottom edge of the notch silhouette when warm —
@@ -1280,15 +1587,11 @@ private struct NotchMorphHost: View {
             }
 
             if let alert = self.visibleAlert, !self.isHovering, !self.isCalibrating {
-                NotchThresholdToast(alert: alert)
-                    .offset(y: self.notchHeight + 12)
-                    .transition(
-                        .asymmetric(
-                            insertion: .opacity
-                                .combined(with: .scale(scale: 0.96, anchor: .top))
-                                .combined(with: .offset(y: -6)),
-                            removal: .opacity
-                                .combined(with: .offset(y: -4))))
+                NotchThresholdSheet(
+                    alert: alert,
+                    notchWidth: self.notchWidth,
+                    notchHeight: self.notchHeight)
+                    .transition(self.alertTransition)
                     .allowsHitTesting(false)
             }
         }
@@ -1372,7 +1675,7 @@ private struct NotchMorphHost: View {
         self.alertDismissTask?.cancel()
         let show: Animation = self.reduceMotion
             ? .linear(duration: 0.05)
-            : .spring(duration: 0.24, bounce: 0.18)
+            : .timingCurve(0.165, 0.84, 0.44, 1, duration: 0.22)
         withAnimation(show) {
             self.visibleAlert = alert
         }
@@ -1389,7 +1692,7 @@ private struct NotchMorphHost: View {
         self.alertDismissTask?.cancel()
         let hide: Animation = self.reduceMotion
             ? .linear(duration: 0.05)
-            : .easeOut(duration: 0.18)
+            : .easeOut(duration: 0.16)
         withAnimation(hide) {
             self.visibleAlert = nil
         }
@@ -1493,6 +1796,7 @@ private struct NotchMorphHost: View {
         // open lands on pin / auto cleanly. Polling itself stays
         // running — the pill hover is what gates it now.
         self.model.setPreviewClaudeSessionId(nil)
+        self.model.setPreviewSessionId(nil, provider: .codex)
         // Light tick on close, but only if we were actually open —
         // intent-debounce cancels shouldn't fire haptics.
         if wasOpen {
@@ -1785,29 +2089,24 @@ private struct AlcoveContent: View {
     }
 }
 
-// MARK: - Alcove shell (header + tools + content + dev gear)
+// MARK: - Alcove shell (decision surface + dev gear)
 
-/// The expanded alcove dashboard. Header sticky on top, hover-driven tool
-/// strip below, content area routed by the active tool, and a small
-/// wrench icon on the right that toggles a dev panel (choreography +
-/// spring pickers, hidden from regular users).
+/// The expanded alcove dashboard. The normal surface is a single live
+/// decision panel; the wrench toggles the hidden dev panel for
+/// choreography, calibration, and notch alert fixtures.
 private struct AlcoveShell: View {
     let state: NotchDisplayState
     let model: MenuBarModel
     let reduceMotion: Bool
     let onTriggerDebugAlert: (NotchThresholdAlert) -> Void
 
-    @State private var activeTool: NotchTool = .now
-    @State private var hoverTask: Task<Void, Never>?
     @State private var inDevMode: Bool = false
-    @Namespace private var indicatorNamespace
+    @State private var selectedLens: NotchInsightLens = .runway
+    @State private var lensHoverTask: Task<Void, Never>?
+    @Namespace private var lensNamespace
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Tabs (or DEV label) cluster on the left with the wrench
-            // sitting immediately to their right — keeps the controls
-            // visually grouped instead of the wrench floating in
-            // far-right empty space.
             HStack(alignment: .center, spacing: 6) {
                 if self.inDevMode {
                     HStack(spacing: 5) {
@@ -1820,15 +2119,12 @@ private struct AlcoveShell: View {
                             .tracking(1.4)
                     }
                 } else {
-                    ToolStrip(
-                        activeTool: self.activeTool,
-                        namespace: self.indicatorNamespace,
-                        reduceMotion: self.reduceMotion,
-                        onHover: self.handleToolHover)
-                        .fixedSize()
+                    MissionStrip(state: self.state)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 DevGear(isActive: self.inDevMode) {
                     HapticGate.perform(.alignment)
+                    self.lensHoverTask?.cancel()
                     let anim: Animation = self.reduceMotion
                         ? .linear(duration: 0.05)
                         : .spring(duration: 0.32, bounce: 0.10)
@@ -1839,6 +2135,14 @@ private struct AlcoveShell: View {
                 Spacer(minLength: 0)
             }
 
+            if !self.inDevMode {
+                InsightLensRail(
+                    selectedLens: self.selectedLens,
+                    namespace: self.lensNamespace,
+                    onHover: self.handleLensHover)
+                    .transition(self.contentTransition)
+            }
+
             ZStack(alignment: .topLeading) {
                 if self.inDevMode {
                     DevPanel(
@@ -1846,11 +2150,19 @@ private struct AlcoveShell: View {
                         onTriggerDebugAlert: self.onTriggerDebugAlert)
                         .transition(self.contentTransition)
                 } else {
-                    self.activeToolView()
+                    NotchInsightContent(
+                        lens: self.selectedLens,
+                        state: self.state,
+                        model: self.model)
+                        .id(self.selectedLens)
                         .transition(self.contentTransition)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .onDisappear {
+            self.lensHoverTask?.cancel()
+            self.lensHoverTask = nil
         }
     }
 
@@ -1869,93 +2181,106 @@ private struct AlcoveShell: View {
         )
     }
 
-    @ViewBuilder
-    private func activeToolView() -> some View {
-        switch self.activeTool {
-        case .now:
-            NowTool(state: self.state, model: self.model)
-                .id("tool-now")
-        case .patterns:
-            PatternsTool(model: self.model)
-                .id("tool-patterns")
-        case .wrap:
-            WrapTool(model: self.model)
-                .id("tool-wrap")
-        case .health:
-            HealthTool(model: self.model)
-                .id("tool-health")
-        }
-    }
+    /// Hover-driven lens switching. This restores the old notch behavior:
+    /// moving across the rail only queues a switch, and any enter/exit
+    /// cancels the queue. The lens changes only after the cursor settles.
+    private static let lensHoverIntent: Duration = .milliseconds(150)
 
-    /// Hover-driven tool switching. Intent debounce calibrated so a
-    /// normal-speed cursor traversing the strip never trips a switch
-    /// mid-motion. 150ms catches the deliberate dwell while letting
-    /// drive-through traffic pass cleanly and maintaining responsiveness.
-    private static let toolHoverIntent: Duration = .milliseconds(150)
-
-    private func handleToolHover(_ tool: NotchTool, hovering: Bool) {
-        // Any movement (enter or exit) resets the pending switch — that's
-        // what gives the debounce its "must stop" feel.
-        self.hoverTask?.cancel()
+    private func handleLensHover(_ lens: NotchInsightLens, hovering: Bool) {
+        self.lensHoverTask?.cancel()
         guard hovering else { return }
-        if tool == self.activeTool { return }
-        self.hoverTask = Task { @MainActor in
-            try? await Task.sleep(for: Self.toolHoverIntent)
+        if lens == self.selectedLens { return }
+
+        self.lensHoverTask = Task { @MainActor in
+            try? await Task.sleep(for: Self.lensHoverIntent)
             if Task.isCancelled { return }
-            // Light tick when the dwell commits — feels like clicking
-            // through Dock items even though it's hover-driven.
             HapticGate.perform(.alignment)
             let anim: Animation = self.reduceMotion
                 ? .linear(duration: 0.05)
                 : .spring(duration: 0.18, bounce: 0.04)
             withAnimation(anim) {
-                self.activeTool = tool
+                self.selectedLens = lens
             }
         }
     }
 }
 
-// MARK: - Tool strip (hover-switching)
+private enum NotchInsightLens: String, CaseIterable, Identifiable {
+    case runway
+    case caps
+    case turn
+    case story
+    case health
 
-private struct ToolStrip: View {
-    let activeTool: NotchTool
+    var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .runway: "Now"
+        case .caps: "Caps"
+        case .turn: "Turn"
+        case .story: "Story"
+        case .health: "Trust"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .runway: "arrow.forward"
+        case .caps: "gauge"
+        case .turn: "bolt.fill"
+        case .story: "sparkles"
+        case .health: "waveform.path.ecg"
+        }
+    }
+}
+
+private struct InsightLensRail: View {
+    let selectedLens: NotchInsightLens
     let namespace: Namespace.ID
-    let reduceMotion: Bool
-    let onHover: (NotchTool, Bool) -> Void
+    let onHover: (NotchInsightLens, Bool) -> Void
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(NotchTool.allCases) { tool in
-                ToolTab(
-                    tool: tool,
-                    isActive: tool == self.activeTool,
+            ForEach(NotchInsightLens.allCases) { lens in
+                InsightLensTab(
+                    lens: lens,
+                    isActive: lens == self.selectedLens,
                     namespace: self.namespace,
-                    reduceMotion: self.reduceMotion,
-                    onHover: { hovering in self.onHover(tool, hovering) })
+                    onHover: { hovering in self.onHover(lens, hovering) })
             }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .padding(3)
+        .background {
+            Capsule()
+                .fill(Color.white.opacity(0.045))
+                .overlay {
+                    Capsule()
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
         }
     }
 }
 
-private struct ToolTab: View {
-    let tool: NotchTool
+private struct InsightLensTab: View {
+    let lens: NotchInsightLens
     let isActive: Bool
     let namespace: Namespace.ID
-    let reduceMotion: Bool
     let onHover: (Bool) -> Void
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: self.tool.symbol)
+            Image(systemName: self.lens.symbol)
                 .font(.system(size: 8, weight: .semibold))
-            Text(self.tool.label)
+            Text(self.lens.label.uppercased())
                 .font(.geist(size: 9, weight: .bold))
                 .tracking(1.0)
         }
         .foregroundStyle(self.isActive
             ? NotchPalette.primaryText
             : NotchPalette.tertiaryText)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .background {
             if self.isActive {
@@ -1964,11 +2289,956 @@ private struct ToolTab: View {
                     .overlay {
                         Capsule().stroke(Color.white.opacity(0.10), lineWidth: 1)
                     }
-                    .matchedGeometryEffect(id: "tool-pill", in: self.namespace)
+                    .matchedGeometryEffect(id: "lens-pill", in: self.namespace)
             }
         }
         .contentShape(Capsule())
         .onHover(perform: self.onHover)
+        .help(self.lens.label)
+    }
+}
+
+private struct NotchInsightContent: View {
+    let lens: NotchInsightLens
+    let state: NotchDisplayState
+    let model: MenuBarModel
+
+    var body: some View {
+        switch self.lens {
+        case .runway:
+            NowTool(state: self.state, model: self.model)
+        case .caps:
+            CapsLensPanel(state: self.state, model: self.model)
+        case .turn:
+            TurnLensPanel(state: self.state, model: self.model)
+        case .story:
+            StoryLensPanel(state: self.state, model: self.model)
+        case .health:
+            HealthLensPanel(state: self.state, model: self.model)
+        }
+    }
+}
+
+private struct MissionStrip: View {
+    let state: NotchDisplayState
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(self.dotColor)
+                .frame(width: 6, height: 6)
+            Text("WATCHING")
+                .font(.geist(size: 8, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(1.2)
+            Text(self.state.contextIdentityTitle)
+                .font(.geist(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.primaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text("·")
+                .font(.geist(size: 9))
+                .foregroundStyle(NotchPalette.tertiaryText)
+            Text(self.state.bottleneckLabel.lowercased())
+                .font(.geistMono(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.tone(self.state.bottleneckTone))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background {
+            Capsule()
+                .fill(Color.white.opacity(0.045))
+                .overlay {
+                    Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
+        }
+    }
+
+    private var dotColor: Color {
+        if self.state.depletedTitle != nil { return NotchPalette.danger }
+        if self.state.liveSessionCount > 0 { return NotchPalette.live }
+        return NotchPalette.tone(self.state.bottleneckTone)
+    }
+}
+
+// MARK: - Insight lenses
+
+private struct CapsLensPanel: View {
+    let state: NotchDisplayState
+    let model: MenuBarModel
+
+    private struct PaceSignal {
+        let value: String
+        let detail: String
+        let tone: UsageTone
+        let isWarning: Bool
+    }
+
+    private var shouldShowOAuthHint: Bool {
+        guard self.model.selectedProvider == .claude else { return false }
+        let windows = self.model.selectedSnapshot?.windows ?? []
+        return !windows.contains { $0.id.hasPrefix("claude-oauth-") }
+    }
+
+    var body: some View {
+        LensPanel {
+            LensHeader(
+                eyebrow: "CAPS",
+                title: self.capTitle,
+                detail: self.capDetail,
+                symbol: "gauge",
+                tone: self.state.bottleneckTone)
+
+            HStack(spacing: 7) {
+                CapGaugeCard(
+                    label: "5h burst",
+                    window: self.state.fiveHour,
+                    forecast: self.state.fiveHourForecast,
+                    symbol: "bolt.fill")
+                CapGaugeCard(
+                    label: "weekly",
+                    window: self.state.weekly,
+                    forecast: self.state.weeklyForecast,
+                    symbol: "calendar")
+            }
+
+            if let signal = self.paceSignal {
+                LensSignalRow(
+                    label: "pace",
+                    value: signal.value,
+                    detail: signal.detail,
+                    tone: signal.tone)
+            }
+
+            VStack(spacing: 5) {
+                if let opus = self.state.weeklyOpus {
+                    CapSubWindowChip(window: opus)
+                }
+                if let sonnet = self.state.weeklySonnet {
+                    CapSubWindowChip(window: sonnet)
+                }
+                if self.shouldShowOAuthHint {
+                    NotchOAuthMissingHint()
+                }
+            }
+
+            HStack(spacing: 6) {
+                LensMetricPill(label: "plan", value: self.state.planName ?? self.model.selectedProvider.displayName)
+                if let credit = self.model.selectedSnapshot?.creditBalance {
+                    LensMetricPill(label: "credits", value: String(format: "%.0f", credit))
+                }
+                if let used = self.state.spendUsed, let limit = self.state.spendLimit, limit > 0 {
+                    LensMetricPill(label: "extra", value: "\(Int((used / limit * 100).rounded()))%")
+                }
+            }
+        }
+    }
+
+    private var capTitle: String {
+        if let signal = self.paceSignal,
+           signal.isWarning
+        {
+            return "Cap pace needs attention"
+        }
+        if self.state.bottleneckLabel == "5H CAP" || self.state.bottleneckLabel == "7D CAP" {
+            return "\(self.state.bottleneckLabel) is the ceiling"
+        }
+        if self.state.fiveHour == nil && self.state.weekly == nil {
+            return "Caps need a connection"
+        }
+        return "Caps are comfortable"
+    }
+
+    private var capDetail: String {
+        if let depleted = self.state.depletedTitle {
+            return "\(depleted) · \(self.state.depletedCountdown ?? "wait")"
+        }
+        if let signal = self.paceSignal,
+           signal.isWarning
+        {
+            return signal.detail
+        }
+        if self.state.bottleneckLabel == "5H CAP" || self.state.bottleneckLabel == "7D CAP" {
+            return self.state.bottleneckDetail
+        }
+        if let forecast = self.readableForecastSummary {
+            return forecast
+        }
+        if self.state.fiveHour != nil || self.state.weekly != nil {
+            return "\(self.readableCapSummary) · windows stay quiet until they need attention"
+        }
+        return "windows stay quiet until they need attention"
+    }
+
+    private var paceSignal: PaceSignal? {
+        let warningParts = [
+            Self.forecastWarningCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
+            Self.forecastWarningCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
+        ].compactMap { $0 }
+        if !warningParts.isEmpty {
+            return PaceSignal(
+                value: "Projected over cap",
+                detail: warningParts.joined(separator: " · "),
+                tone: .tight,
+                isWarning: true)
+        }
+
+        let reserveParts = [
+            Self.forecastReserveCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
+            Self.forecastReserveCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
+        ].compactMap { $0 }
+        if !reserveParts.isEmpty {
+            return PaceSignal(
+                value: "Reserve available",
+                detail: reserveParts.joined(separator: " · "),
+                tone: .calm,
+                isWarning: false)
+        }
+
+        let aheadParts = [
+            Self.forecastAheadCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
+            Self.forecastAheadCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
+        ].compactMap { $0 }
+        if !aheadParts.isEmpty {
+            return PaceSignal(
+                value: "Ahead of fair pace",
+                detail: aheadParts.joined(separator: " · "),
+                tone: .watch,
+                isWarning: false)
+        }
+
+        return nil
+    }
+
+    private static func forecastWarningCopy(
+        label: String,
+        window: NotchDisplayState.AlcoveWindow?,
+        forecast: NotchDisplayState.WindowForecastSummary?) -> String?
+    {
+        guard let forecast else { return nil }
+        if let runsOut = forecast.runsOutText {
+            return "\(label) \(runsOut)"
+        }
+        if let over = forecast.projectedOverPercent {
+            return "\(label) \(over)% over if pace holds"
+        }
+        if forecast.aheadOfPacePercent >= 10 {
+            return Self.fairPaceComparisonCopy(label: label, window: window, forecast: forecast)
+                ?? "\(label) \(Int(forecast.aheadOfPacePercent.rounded()))% ahead"
+        }
+        return nil
+    }
+
+    private static func forecastReserveCopy(
+        label: String,
+        window: NotchDisplayState.AlcoveWindow?,
+        forecast: NotchDisplayState.WindowForecastSummary?) -> String?
+    {
+        guard let forecast else { return nil }
+        if let reserve = forecast.projectedReservePercent,
+           reserve >= 1
+        {
+            return "\(label) \(Int(reserve.rounded()))% reserve if pace holds"
+        }
+        if forecast.fairPaceReservePercent >= 2 {
+            return Self.fairPaceComparisonCopy(label: label, window: window, forecast: forecast)
+                ?? "\(label) \(Int(forecast.fairPaceReservePercent.rounded()))% in reserve"
+        }
+        return nil
+    }
+
+    private static func forecastAheadCopy(
+        label: String,
+        window: NotchDisplayState.AlcoveWindow?,
+        forecast: NotchDisplayState.WindowForecastSummary?) -> String?
+    {
+        guard let forecast,
+              forecast.aheadOfPacePercent >= 2
+        else { return nil }
+        return Self.fairPaceComparisonCopy(label: label, window: window, forecast: forecast)
+            ?? "\(label) \(Int(forecast.aheadOfPacePercent.rounded()))% ahead"
+    }
+
+    private static func fairPaceComparisonCopy(
+        label: String,
+        window: NotchDisplayState.AlcoveWindow?,
+        forecast: NotchDisplayState.WindowForecastSummary) -> String?
+    {
+        guard let window else { return nil }
+        let used = Int(window.percent.rounded())
+        let fair = Int(max(0, min(100, window.percent - forecast.paceDeltaPercent)).rounded())
+        if forecast.aheadOfPacePercent >= 2 {
+            let ahead = Int(forecast.aheadOfPacePercent.rounded())
+            return "\(label) \(used)% vs \(fair)% fair (+\(ahead)%)"
+        }
+        if forecast.fairPaceReservePercent >= 2 {
+            let reserve = Int(forecast.fairPaceReservePercent.rounded())
+            return "\(label) \(used)% vs \(fair)% fair (\(reserve)% reserve)"
+        }
+        return nil
+    }
+
+    private var readableForecastSummary: String? {
+        let parts = [
+            Self.forecastCopy(label: "5h", forecast: self.state.fiveHourForecast),
+            Self.forecastCopy(label: "7d", forecast: self.state.weeklyForecast),
+        ].compactMap { $0 }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func forecastCopy(
+        label: String,
+        forecast: NotchDisplayState.WindowForecastSummary?) -> String?
+    {
+        guard let forecast else { return nil }
+        if let runsOut = forecast.runsOutText {
+            return "\(label) \(runsOut)"
+        }
+        if let over = forecast.projectedOverPercent {
+            return "\(label) \(over)% over if pace holds"
+        }
+        if let reserve = forecast.projectedReservePercent,
+           reserve >= 1
+        {
+            return "\(label) \(Int(reserve.rounded()))% reserve"
+        }
+        if forecast.fairPaceReservePercent >= 2 {
+            return "\(label) \(Int(forecast.fairPaceReservePercent.rounded()))% in reserve"
+        }
+        if forecast.aheadOfPacePercent >= 2 {
+            return "\(label) \(Int(forecast.aheadOfPacePercent.rounded()))% ahead"
+        }
+        return nil
+    }
+
+    private var readableCapSummary: String {
+        let parts = [
+            self.state.fiveHour.map { "5h burst \(Int($0.percent.rounded()))%" },
+            self.state.weekly.map { "weekly \(Int($0.percent.rounded()))%" },
+        ].compactMap { $0 }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct CapGaugeCard: View {
+    let label: String
+    let window: NotchDisplayState.AlcoveWindow?
+    let forecast: NotchDisplayState.WindowForecastSummary?
+    let symbol: String
+
+    private var percent: Double { self.window?.percent ?? 0 }
+    private var tone: UsageTone { self.window?.tone ?? .calm }
+    private var fairPacePercent: Int? {
+        guard let window = self.window,
+              let forecast = self.forecast
+        else { return nil }
+        return Int(max(0, min(100, window.percent - forecast.paceDeltaPercent)).rounded())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Image(systemName: self.symbol)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(NotchPalette.tone(self.tone))
+                Text(self.label.uppercased())
+                    .font(.geist(size: 8, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.0)
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(self.window == nil ? "—" : "\(Int(self.percent.rounded()))")
+                    .font(.geistMono(size: 26, weight: .bold))
+                    .foregroundStyle(self.window == nil ? NotchPalette.tertiaryText : NotchPalette.tone(self.tone))
+                    .contentTransition(.numericText())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
+                Text("%")
+                    .font(.geist(size: 11, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+            }
+
+            NotchMiniMeter(percent: self.percent, tone: self.tone, isActive: self.window != nil)
+
+            Text(self.detail)
+                .font(.geist(size: 9, weight: .medium))
+                .foregroundStyle(NotchPalette.secondaryText)
+                .lineLimit(2)
+                .minimumScaleFactor(0.76)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(NotchPalette.tone(self.tone).opacity(self.window == nil ? 0.08 : 0.16), lineWidth: 1)
+                }
+        }
+    }
+
+    private var detail: String {
+        guard let window = self.window else { return "OAuth windows not detected yet" }
+        if window.percent >= 99 { return "depleted · back \(window.resetText)" }
+        if let runsOut = self.forecast?.runsOutText { return runsOut }
+        if let over = self.forecast?.projectedOverPercent {
+            return "\(over)% over if pace holds"
+        }
+        if let reserve = self.forecast?.projectedReservePercent,
+           reserve >= 1
+        {
+            return "\(Int(reserve.rounded()))% reserve if pace holds"
+        }
+        if let reserve = self.forecast?.fairPaceReservePercent,
+           reserve >= 2
+        {
+            if let fairPacePercent {
+                return "\(Int(reserve.rounded()))% reserve · fair \(fairPacePercent)%"
+            }
+            return "\(Int(reserve.rounded()))% reserve"
+        }
+        if let ahead = self.forecast?.aheadOfPacePercent,
+           ahead >= 2
+        {
+            if let fairPacePercent {
+                return "\(Int(ahead.rounded()))% ahead · fair \(fairPacePercent)%"
+            }
+            return "\(Int(ahead.rounded()))% ahead of fair pace"
+        }
+        if let projected = self.forecast?.projectedAtResetPercent,
+           projected >= window.percent + 1
+        {
+            return "tracking to \(Int(projected.rounded()))% by reset"
+        }
+        return "reset \(window.resetText)"
+    }
+}
+
+private struct CapSubWindowChip: View {
+    let window: NotchDisplayState.AlcoveWindow
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(self.window.longLabel.uppercased())
+                .font(.geist(size: 8, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(1.0)
+                .frame(width: 88, alignment: .leading)
+                .lineLimit(1)
+            NotchMiniMeter(percent: self.window.percent, tone: self.window.tone, isActive: true)
+            Text("\(Int(self.window.percent.rounded()))%")
+                .font(.geistMono(size: 10, weight: .semibold))
+                .foregroundStyle(NotchPalette.tone(self.window.tone))
+                .frame(width: 36, alignment: .trailing)
+            Text(self.window.resetText)
+                .font(.geistMono(size: 9, weight: .medium))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .frame(width: 48, alignment: .trailing)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.032), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct NotchMiniMeter: View {
+    let percent: Double
+    let tone: UsageTone
+    let isActive: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.07))
+                Capsule()
+                    .fill(self.isActive ? NotchPalette.tone(self.tone) : Color.white.opacity(0.10))
+                    .frame(width: geo.size.width * min(1, max(0, self.percent / 100)))
+            }
+        }
+        .frame(height: 4)
+    }
+}
+
+private struct TurnLensPanel: View {
+    let state: NotchDisplayState
+    let model: MenuBarModel
+
+    var body: some View {
+        LensPanel {
+            LensHeader(
+                eyebrow: "TURN",
+                title: self.turnTitle,
+                detail: self.turnDetail,
+                symbol: "bolt.fill",
+                tone: self.state.lastTurnImpactTone)
+
+            TurnImpactCard(state: self.state)
+
+            if self.state.hasAdvisor, !self.state.advisorPrimaryDriver.isEmpty {
+                LensSignalRow(
+                    label: "why",
+                    value: self.state.advisorPrimaryDriver,
+                    detail: self.state.advisorDriverDetail,
+                    tone: self.state.advisorTone)
+            }
+
+            if let codex = self.model.selectedSnapshot?.codexSession {
+                HStack(spacing: 6) {
+                    LensMetricPill(label: "tools", value: "\(codex.toolCalls)")
+                    LensMetricPill(label: "shell", value: "\(codex.shellCommands)")
+                    LensMetricPill(label: "patches", value: "\(codex.patchEvents)")
+                    LensMetricPill(label: "errors", value: "\(codex.errors)")
+                }
+            } else {
+                HStack(spacing: 6) {
+                    LensMetricPill(label: "turns", value: "\(self.state.sessionTurns)")
+                    LensMetricPill(label: "today", value: "\(self.state.turnsToday)")
+                    LensMetricPill(label: "tokens", value: self.state.tokensPerTurnToday > 0 ? compactTokens(self.state.tokensPerTurnToday) : "--")
+                }
+            }
+
+            LensSignalRow(
+                label: "next",
+                value: self.state.nextAction,
+                detail: self.state.verdictPattern,
+                tone: self.state.contextTone)
+        }
+    }
+
+    private var turnTitle: String {
+        if self.state.lastTurnImpactValue == "—" { return "Waiting for the next turn" }
+        return "Last turn changed the runway"
+    }
+
+    private var turnDetail: String {
+        if self.state.turnAvgTokens > 0 {
+            return "your average turn is \(compactTokens(self.state.turnAvgTokens)) across \(self.state.turnSampleCount) samples"
+        }
+        return self.state.lastTurnImpactDetail
+    }
+}
+
+private struct TurnImpactCard: View {
+    let state: NotchDisplayState
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(self.state.lastTurnImpactValue)
+                    .font(.geistMono(size: 32, weight: .bold))
+                    .foregroundStyle(NotchPalette.tone(self.state.lastTurnImpactTone))
+                    .contentTransition(.numericText())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.58)
+                Text(self.state.lastTurnImpactDetail)
+                    .font(.geist(size: 10, weight: .semibold))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(1)
+            }
+            .frame(width: 112, alignment: .leading)
+
+            Rectangle()
+                .fill(NotchPalette.tone(self.state.lastTurnImpactTone).opacity(0.18))
+                .frame(width: 1, height: 42)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    LensMetricPill(label: "avg", value: self.state.turnAvgTokens > 0 ? compactTokens(self.state.turnAvgTokens) : "--")
+                    LensMetricPill(label: "samples", value: "\(self.state.turnSampleCount)")
+                }
+                HStack(spacing: 6) {
+                    LensMetricPill(label: "today", value: "\(self.state.turnsToday)")
+                    if self.state.tokensPerTurnToday > 0 {
+                        LensMetricPill(label: "per turn", value: compactTokens(self.state.tokensPerTurnToday))
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(NotchPalette.tone(self.state.lastTurnImpactTone).opacity(0.07))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(NotchPalette.tone(self.state.lastTurnImpactTone).opacity(0.16), lineWidth: 1)
+                }
+        }
+    }
+}
+
+private struct StoryLensPanel: View {
+    let state: NotchDisplayState
+    let model: MenuBarModel
+
+    var body: some View {
+        LensPanel {
+            if let card = self.model.selectedSnapshot?.patternCards.first {
+                StorySpotlightCard(
+                    eyebrow: "STORY",
+                    title: card.title,
+                    detail: card.body,
+                    symbol: "sparkles",
+                    tone: UsageTone(patternTone: card.tone),
+                    highlight: card.highlightValue,
+                    progress: card.progressPercent,
+                    footnote: card.footnote)
+            } else if let surface = self.model.selectedSnapshot?.codexSurface {
+                StorySpotlightCard(
+                    eyebrow: "STORY",
+                    title: "Codex work map",
+                    detail: "\(surface.projectsSeen) projects · \(surface.stateThreadsSeen) threads · \(compactTokens(surface.totalThreadTokens)) tokens",
+                    symbol: "map",
+                    tone: .calm,
+                    highlight: surface.primarySummary,
+                    progress: nil,
+                    footnote: "\(surface.liveSessionsSeen) live")
+
+                if let project = surface.topProjects.first {
+                    LensSignalRow(
+                        label: "top",
+                        value: project.name,
+                        detail: "\(project.threadCount) threads · \(compactTokens(project.tokens)) tokens",
+                        tone: .calm)
+                }
+            } else {
+                LensHeader(
+                    eyebrow: "STORY",
+                    title: "No story yet",
+                    detail: "keep working and Burnrate will surface the first useful pattern here",
+                    symbol: "sparkles",
+                    tone: .watch)
+            }
+
+            HStack(spacing: 6) {
+                LensMetricPill(label: "streak", value: "\(self.state.streakDays)d")
+                if let cache = self.state.cacheHitPercent {
+                    LensMetricPill(label: "cache", value: "\(cache)%")
+                }
+                if self.state.liveSessionCount > 0 {
+                    LensMetricPill(label: "live", value: "\(self.state.liveSessionCount)")
+                }
+            }
+        }
+    }
+}
+
+private struct StorySpotlightCard: View {
+    let eyebrow: String
+    let title: String
+    let detail: String
+    let symbol: String
+    let tone: UsageTone
+    let highlight: String?
+    let progress: Double?
+    let footnote: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: self.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(NotchPalette.tone(self.tone))
+                    .frame(width: 28, height: 28)
+                    .background(NotchPalette.tone(self.tone).opacity(0.13), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(self.eyebrow.uppercased())
+                        .font(.geist(size: 8, weight: .bold))
+                        .foregroundStyle(NotchPalette.tertiaryText)
+                        .tracking(1.3)
+                    Text(self.title)
+                        .font(.geist(size: 15, weight: .semibold))
+                        .foregroundStyle(NotchPalette.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Text(self.detail)
+                        .font(.geist(size: 10, weight: .medium))
+                        .foregroundStyle(NotchPalette.secondaryText)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if let highlight = self.highlight, !highlight.isEmpty {
+                HStack(spacing: 7) {
+                    Text("SIGNAL")
+                        .font(.geist(size: 8, weight: .bold))
+                        .foregroundStyle(NotchPalette.tertiaryText)
+                        .tracking(1.1)
+                    Text(highlight)
+                        .font(.geist(size: 11, weight: .semibold))
+                        .foregroundStyle(NotchPalette.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 0)
+                }
+            }
+
+            if let progress = self.progress {
+                HStack(spacing: 8) {
+                    NotchMiniMeter(percent: progress, tone: self.tone, isActive: true)
+                    Text("\(Int(progress.rounded()))%")
+                        .font(.geistMono(size: 10, weight: .semibold))
+                        .foregroundStyle(NotchPalette.tone(self.tone))
+                        .frame(width: 38, alignment: .trailing)
+                }
+            }
+
+            if let footnote = self.footnote, !footnote.isEmpty {
+                Text(footnote)
+                    .font(.geist(size: 9, weight: .medium))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(NotchPalette.tone(self.tone).opacity(0.065))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(NotchPalette.tone(self.tone).opacity(0.15), lineWidth: 1)
+                }
+        }
+    }
+}
+
+private struct HealthLensPanel: View {
+    let state: NotchDisplayState
+    let model: MenuBarModel
+
+    var body: some View {
+        LensPanel {
+            TrustSummaryCard(
+                title: self.healthTitle,
+                detail: self.healthDetail,
+                symbol: self.model.lastError == nil ? "checkmark.seal.fill" : "exclamationmark.triangle.fill",
+                tone: self.model.lastError == nil ? self.state.advisorTone : .tight)
+
+            if let error = self.model.lastError {
+                LensSignalRow(
+                    label: "error",
+                    value: error.title,
+                    detail: error.recovery ?? error.raw,
+                    tone: .tight)
+            }
+
+            ForEach(self.indicators.prefix(3)) { indicator in
+                LensSignalRow(
+                    label: indicator.status.rawValue,
+                    value: indicator.label,
+                    detail: indicator.detail,
+                    tone: UsageTone(status: indicator.status))
+            }
+
+            if self.indicators.isEmpty, self.model.lastError == nil {
+                LensSignalRow(
+                    label: "status",
+                    value: "No active problems",
+                    detail: "local readers are returning data",
+                    tone: .calm)
+            }
+
+            HStack(spacing: 6) {
+                LensMetricPill(label: "provider", value: self.model.selectedProvider.displayName)
+                LensMetricPill(label: "project", value: self.state.projectLabel)
+                if let branch = self.state.gitBranch {
+                    LensMetricPill(label: "branch", value: branch)
+                }
+            }
+        }
+    }
+
+    private var indicators: [ClaudeHealthIndicator] {
+        self.model.selectedSnapshot?.healthIndicators ?? []
+    }
+
+    private var healthTitle: String {
+        if self.model.lastError != nil { return "Needs attention" }
+        if self.indicators.contains(where: { $0.status == .error }) { return "One signal is failing" }
+        if self.indicators.contains(where: { $0.status == .warn }) { return "Worth checking" }
+        return "Looks healthy"
+    }
+
+    private var healthDetail: String {
+        if let error = self.model.lastError { return error.recovery ?? error.raw }
+        let ready = self.indicators.filter { $0.status == .ok }.count
+        if !self.indicators.isEmpty { return "\(ready)/\(self.indicators.count) checks clean" }
+        return "no stale auth or parser warning surfaced"
+    }
+}
+
+private struct TrustSummaryCard: View {
+    let title: String
+    let detail: String
+    let symbol: String
+    let tone: UsageTone
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: self.symbol)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(NotchPalette.tone(self.tone))
+                .frame(width: 30, height: 30)
+                .background(NotchPalette.tone(self.tone).opacity(0.13), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("TRUST")
+                    .font(.geist(size: 8, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.3)
+                Text(self.title)
+                    .font(.geist(size: 15, weight: .semibold))
+                    .foregroundStyle(NotchPalette.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Text(self.detail)
+                    .font(.geist(size: 10, weight: .medium))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(NotchPalette.tone(self.tone).opacity(0.065))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(NotchPalette.tone(self.tone).opacity(0.15), lineWidth: 1)
+                }
+        }
+    }
+}
+
+private struct LensPanel<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            self.content
+        }
+        .padding(11)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.075), lineWidth: 1)
+                }
+        }
+    }
+}
+
+private struct LensHeader: View {
+    let eyebrow: String
+    let title: String
+    let detail: String
+    let symbol: String
+    let tone: UsageTone
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: self.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(NotchPalette.tone(self.tone))
+                .frame(width: 26, height: 26)
+                .background(NotchPalette.tone(self.tone).opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(self.eyebrow)
+                    .font(.geist(size: 8, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.3)
+                Text(self.title)
+                    .font(.geist(size: 15, weight: .semibold))
+                    .foregroundStyle(NotchPalette.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Text(self.detail)
+                    .font(.geist(size: 10, weight: .medium))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct LensSignalRow: View {
+    let label: String
+    let value: String
+    let detail: String
+    let tone: UsageTone
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(self.label.uppercased())
+                .font(.geist(size: 8, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(1.2)
+                .frame(width: 38, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(self.value)
+                    .font(.geist(size: 11, weight: .semibold))
+                    .foregroundStyle(NotchPalette.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                if !self.detail.isEmpty {
+                    Text(self.detail)
+                        .font(.geist(size: 9, weight: .medium))
+                        .foregroundStyle(NotchPalette.secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+            }
+            Spacer(minLength: 0)
+            Circle()
+                .fill(NotchPalette.tone(self.tone))
+                .frame(width: 6, height: 6)
+                .padding(.top, 4)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct LensMetricPill: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(self.label.uppercased())
+                .font(.geist(size: 7, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(1.0)
+            Text(self.value)
+                .font(.geistMono(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(Color.white.opacity(0.055), in: Capsule())
     }
 }
 
@@ -1992,36 +3262,14 @@ private struct DevGear: View {
     }
 }
 
-// MARK: - PACE tool
+// MARK: - Decision surface
 
-/// NOW tab — the dense overview. Mirrors the menu bar's NOW tab in one
-/// non-scrolling alcove surface. Three rings on top show the constraints
-/// people care about (CONTEXT, 5H BURST, WEEKLY); the advisor's
-/// WHY/WHEN sits below as actionable insight; runway anchors the bottom.
-/// This is the tab a user lands on by default — everything they need in
-/// the middle of a Claude Code session.
+/// The hover surface answers the live working question first, then
+/// exposes the supporting context and usage caps beneath it.
 private struct NowTool: View {
     let state: NotchDisplayState
     let model: MenuBarModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    /// Picker only useful when (a) viewing Claude (only Claude is
-    /// pinnable in the watcher path) and (b) there are 2+ unique
-    /// live sessions to choose from.
-    private var canPickClaudeSession: Bool {
-        self.model.selectedProvider == .claude
-            && self.uniqueClaudeSessions.count >= 2
-    }
-
-    private var uniqueClaudeSessions: [LiveSession] {
-        var seen: Set<String> = []
-        var result: [LiveSession] = []
-        for session in self.state.liveClaudeSessions where !seen.contains(session.sessionId) {
-            seen.insert(session.sessionId)
-            result.append(session)
-        }
-        return result
-    }
 
     /// Mirrors the menu bar's `WindowsSection.showsAuthHint`: only
     /// for Claude (Codex doesn't use OAuth windows), and only when
@@ -2151,106 +3399,12 @@ private struct NowTool: View {
                     contextPercent: self.state.fireContextPercent)
             }
 
-            // PERSONALIZED FORECAST — verdict + bucket chips +
-            // transparency line. Lifted from the menu bar's
-            // PersonalizedForecast: turns abstract "% remaining" into
-            // "N small / M medium / L large asks left" anchored to
-            // the user's actual turn-size pattern. Only renders when
-            // there's enough data; the block self-gates internally.
             if self.state.depletedTitle == nil {
-                PersonalizedForecastBlock(model: self.model)
+                RunwayBriefingPanel(
+                    state: self.state,
+                    model: self.model,
+                    shouldShowOAuthHint: self.shouldShowOAuthHint)
             }
-
-            // SUPPORTING — windows as compact meter rows. Renders the
-            // canonical 5H + Weekly plus any Opus/Sonnet weekly splits
-            // that exist on the user's plan, so the alcove matches the
-            // menu bar's full window list.
-            VStack(spacing: 5) {
-                WindowMeterRow(
-                    label: "5h burst",
-                    percent: self.state.fiveHour?.percent ?? 0,
-                    tone: self.state.fiveHour?.tone ?? .calm,
-                    resetText: self.state.fiveHour?.resetText ?? "—",
-                    isActive: self.state.fiveHour != nil,
-                    forecast: self.state.fiveHourForecast,
-                    resetsAt: self.state.fiveHour?.resetsAt)
-                WindowMeterRow(
-                    label: "weekly",
-                    percent: self.state.weekly?.percent ?? 0,
-                    tone: self.state.weekly?.tone ?? .calm,
-                    resetText: self.state.weekly?.resetText ?? "—",
-                    isActive: self.state.weekly != nil,
-                    forecast: self.state.weeklyForecast,
-                    resetsAt: self.state.weekly?.resetsAt)
-                if let opus = self.state.weeklyOpus {
-                    WindowMeterRow(
-                        label: "weekly opus",
-                        percent: opus.percent,
-                        tone: opus.tone,
-                        resetText: opus.resetText,
-                        isActive: true,
-                        resetsAt: opus.resetsAt)
-                }
-                if let sonnet = self.state.weeklySonnet {
-                    WindowMeterRow(
-                        label: "weekly sonnet",
-                        percent: sonnet.percent,
-                        tone: sonnet.tone,
-                        resetText: sonnet.resetText,
-                        isActive: true,
-                        resetsAt: sonnet.resetsAt)
-                }
-
-                // OAuth missing — Claude is selected but no OAuth
-                // windows came through. Without OAuth we can't read
-                // 5h or 7d caps, so the meters above all show "—".
-                // Surface the recovery path inline.
-                if self.shouldShowOAuthHint {
-                    NotchOAuthMissingHint()
-                }
-            }
-
-            // WHY row — the advisor's primary driver. The menu bar's
-            // signature insight ("input tokens dominating · 80% of
-            // context this turn"), surfaced as a single inline line
-            // beneath the window meters.
-            if self.state.hasAdvisor, !self.state.advisorPrimaryDriver.isEmpty {
-                HStack(spacing: 8) {
-                    Text("WHY")
-                        .font(.geist(size: 8, weight: .bold))
-                        .foregroundStyle(NotchPalette.tertiaryText)
-                        .tracking(1.4)
-                        .frame(width: 32, alignment: .leading)
-                    Text(self.state.advisorPrimaryDriver)
-                        .font(.geist(size: 11, weight: .semibold))
-                        .foregroundStyle(NotchPalette.primaryText)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if !self.state.advisorDriverDetail.isEmpty {
-                        Text("·")
-                            .font(.geist(size: 10))
-                            .foregroundStyle(NotchPalette.tertiaryText)
-                        Text(self.state.advisorDriverDetail)
-                            .font(.geist(size: 10))
-                            .foregroundStyle(NotchPalette.tertiaryText)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-
-            if self.model.selectedProvider == .codex,
-               let snapshot = self.model.selectedSnapshot
-            {
-                CodexWorkRibbon(snapshot: snapshot)
-            }
-
-            // ─────────────────────────────────────────────────
-            // Footer monitoring strip — cost today · peak hour · days
-            // left in cycle. Sits at the very bottom of NOW, fills the
-            // space the alcove had reserved for it.
-            NowFooterStrip(state: self.state)
         }
         .onChange(of: self.state.fireActive) { _, newValue in
             // Firmer haptic when "playing with fire" trips — the
@@ -2324,6 +3478,809 @@ private struct NowTool: View {
                 try? await Task.sleep(for: .milliseconds(restingPauseMs))
             }
         }
+    }
+}
+
+/// The NOW lens is a briefing, not a mini dashboard. It keeps the
+/// context runway visible, then explains the one pressure point, the
+/// last turn's blast radius, and the next useful move.
+private struct RunwayBriefingPanel: View {
+    let state: NotchDisplayState
+    let model: MenuBarModel
+    let shouldShowOAuthHint: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if self.state.hasContext,
+               let context = self.model.selectedSnapshot?.workContext
+            {
+                ContextIdentityStrip(state: self.state)
+                LiveConversationDock(model: self.model)
+                ContextRunwayGauge(
+                    percent: self.state.contextPercent,
+                    used: compactTokens(context.contextUsedTokens),
+                    total: compactTokens(context.contextWindowTokens),
+                    left: compactTokens(context.contextRemainingTokens),
+                    tone: self.state.contextTone)
+                RunwayBucketRow(model: self.model)
+            }
+
+            RunwayCompactSignalRow(state: self.state)
+
+            RunwayAdvisorRibbon(
+                eyebrow: self.advisorEyebrow,
+                title: self.advisorTitle,
+                detail: self.advisorDetail,
+                symbol: self.state.hasAdvisor ? self.state.advisorIconName : "arrow.forward",
+                tone: self.state.hasAdvisor ? self.state.advisorTone : self.state.contextTone)
+
+            RunwayPlanStrip(state: self.state, model: self.model)
+
+            if self.shouldShowOAuthHint {
+                NotchOAuthMissingHint()
+            }
+
+            if self.model.selectedProvider == .codex,
+               let snapshot = self.model.selectedSnapshot
+            {
+                CodexWorkRibbon(snapshot: snapshot)
+            }
+
+            NowFooterStrip(state: self.state)
+        }
+    }
+
+    private var advisorEyebrow: String {
+        self.state.hasAdvisor ? "why it thinks that" : "next move"
+    }
+
+    private var advisorTitle: String {
+        if self.state.hasAdvisor, !self.state.advisorPrimaryDriver.isEmpty {
+            return self.state.advisorPrimaryDriver
+        }
+        return self.state.nextAction
+    }
+
+    private var advisorDetail: String {
+        if !self.state.advisorDriverDetail.isEmpty { return self.state.advisorDriverDetail }
+        if !self.state.advisorForecast.isEmpty { return self.state.advisorForecast }
+        return self.state.verdictPattern
+    }
+}
+
+private struct ContextRunwayGauge: View {
+    let percent: Double
+    let used: String
+    let total: String
+    let left: String
+    let tone: UsageTone
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                Text("CONTEXT RUNWAY")
+                    .font(.geist(size: 8, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.3)
+                Text("\(Int(self.percent.rounded()))% used")
+                    .font(.geistMono(size: 10, weight: .semibold))
+                    .foregroundStyle(NotchPalette.tone(self.tone))
+                    .contentTransition(.numericText())
+                Spacer(minLength: 0)
+                Text("\(self.left) left")
+                    .font(.geistMono(size: 9, weight: .medium))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(1)
+            }
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.white.opacity(0.07))
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    NotchPalette.tone(self.tone).opacity(0.85),
+                                    NotchPalette.tone(self.tone).opacity(0.35)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing)
+                        )
+                        .frame(width: geo.size.width * min(1, max(0, self.percent / 100)))
+                }
+            }
+            .frame(height: 5)
+
+            HStack(spacing: 4) {
+                Text(self.used)
+                    .font(.geistMono(size: 9, weight: .semibold))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                Text("of")
+                    .font(.geist(size: 9))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                Text(self.total)
+                    .font(.geistMono(size: 9, weight: .medium))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.075), lineWidth: 1)
+                }
+        }
+    }
+}
+
+private struct ContextIdentityStrip: View {
+    let state: NotchDisplayState
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Image(systemName: "text.bubble.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(NotchPalette.accent)
+                .frame(width: 22, height: 22)
+                .background(NotchPalette.accent.opacity(0.11), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("WATCHING")
+                    .font(.geist(size: 7, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.2)
+                Text(self.state.contextIdentityTitle)
+                    .font(.geist(size: 11, weight: .semibold))
+                    .foregroundStyle(NotchPalette.primaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if !self.state.contextIdentityDetail.isEmpty {
+                    Text(self.state.contextIdentityDetail)
+                        .font(.geist(size: 9, weight: .medium))
+                        .foregroundStyle(NotchPalette.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.075), lineWidth: 1)
+                }
+        }
+        .help(self.helpText)
+    }
+
+    private var helpText: String {
+        if self.state.contextIdentityDetail.isEmpty {
+            return self.state.contextIdentityTitle
+        }
+        return "\(self.state.contextIdentityTitle) · \(self.state.contextIdentityDetail)"
+    }
+}
+
+private struct LiveConversationEntry: Identifiable, Equatable {
+    let provider: ProviderKind
+    let session: LiveSession
+
+    var id: String {
+        "\(self.provider.rawValue)-\(self.session.sessionId)"
+    }
+}
+
+/// Compact "smart space" beneath WATCHING. The notch follows the
+/// freshest conversation by default, but this rail lets the user
+/// temporarily inspect another live room with hover or lock it with a
+/// click. Five visible rooms is the readability ceiling in the notch;
+/// anything beyond that collapses into a count.
+private struct LiveConversationDock: View {
+    let model: MenuBarModel
+
+    private static let visibleLimit = 5
+
+    private var provider: ProviderKind {
+        self.model.selectedProvider
+    }
+
+    private var providerTitle: String {
+        switch self.provider {
+        case .codex: return "CODEX CLI"
+        case .claude: return "CLAUDE CODE"
+        }
+    }
+
+    private var entries: [LiveConversationEntry] {
+        var seen: Set<String> = []
+        var result: [LiveConversationEntry] = []
+        guard let snapshot = self.model.overview.snapshot(for: self.provider)
+        else { return [] }
+
+        for session in snapshot.liveSessions {
+            let entry = LiveConversationEntry(provider: snapshot.kind, session: session)
+            guard !seen.contains(entry.id) else { continue }
+            seen.insert(entry.id)
+            result.append(entry)
+        }
+        return result.sorted { $0.session.lastActivityAt > $1.session.lastActivityAt }
+    }
+
+    private var visibleEntries: [LiveConversationEntry] {
+        var result = Array(self.entries.prefix(Self.visibleLimit))
+
+        // Keep the visible rail in recency order while hovering. Moving the
+        // previewed chip to the first slot makes the cursor leave the chip,
+        // which cancels the preview before its context refresh can land.
+        for id in [self.pinnedEntryId, self.activeEntryId].compactMap({ $0 }) {
+            guard !result.contains(where: { $0.id == id }),
+                  let entry = self.entries.first(where: { $0.id == id })
+            else { continue }
+            if result.count >= Self.visibleLimit {
+                result.removeLast()
+            }
+            result.append(entry)
+        }
+        return result
+    }
+
+    private var overflowCount: Int {
+        max(0, self.entries.count - Self.visibleLimit)
+    }
+
+    private var pinnedEntryId: String? {
+        if self.provider == .codex, let id = self.model.pinnedCodexSessionId {
+            return "\(ProviderKind.codex.rawValue)-\(id)"
+        }
+        if self.provider == .claude, let id = self.model.pinnedClaudeSessionId {
+            return "\(ProviderKind.claude.rawValue)-\(id)"
+        }
+        return nil
+    }
+
+    private var previewEntryId: String? {
+        if self.provider == .codex, let id = self.model.previewCodexSessionId {
+            return "\(ProviderKind.codex.rawValue)-\(id)"
+        }
+        if self.provider == .claude, let id = self.model.previewClaudeSessionId {
+            return "\(ProviderKind.claude.rawValue)-\(id)"
+        }
+        return nil
+    }
+
+    private var activeEntryId: String? {
+        guard let snapshot = self.model.selectedSnapshot,
+              let sessionId = snapshot.workContext?.sessionId
+        else { return nil }
+        return "\(snapshot.kind.rawValue)-\(sessionId)"
+    }
+
+    private var modeLabel: String {
+        if self.pinnedEntryId != nil { return "LOCKED" }
+        if self.previewEntryId != nil { return "PEEK" }
+        return "RECENT"
+    }
+
+    var body: some View {
+        if self.entries.count >= 2 {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(self.providerTitle)
+                        .font(.geist(size: 7, weight: .bold))
+                        .foregroundStyle(NotchPalette.tertiaryText)
+                        .tracking(1.1)
+                    Text("\(self.entries.count)")
+                        .font(.geistMono(size: 8, weight: .bold))
+                        .foregroundStyle(NotchPalette.secondaryText)
+                    Spacer(minLength: 0)
+                    Text(self.modeLabel)
+                        .font(.geistMono(size: 8, weight: .semibold))
+                        .foregroundStyle(self.pinnedEntryId == nil
+                            ? NotchPalette.tertiaryText
+                            : NotchPalette.accent)
+                }
+
+                HStack(spacing: 5) {
+                    ForEach(self.visibleEntries) { entry in
+                        LiveConversationChip(
+                            entry: entry,
+                            isActive: self.activeEntryId == entry.id,
+                            isPinned: self.pinnedEntryId == entry.id,
+                            isPreview: self.previewEntryId == entry.id,
+                            onPreview: { hovering in
+                                self.handlePreview(entry: entry, hovering: hovering)
+                            },
+                            onTogglePin: {
+                                self.togglePin(entry: entry)
+                            })
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    if self.overflowCount > 0 {
+                        Text("+\(self.overflowCount)")
+                            .font(.geistMono(size: 9, weight: .bold))
+                            .foregroundStyle(NotchPalette.tertiaryText)
+                            .frame(width: 28, height: 24)
+                            .background {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Color.white.opacity(0.035))
+                                    .overlay {
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                                    }
+                            }
+                            .help("More recent conversations are active outside the notch rail.")
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(0.025))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    }
+            }
+            .help("Hover a room to peek at its context. Click to lock or unlock it.")
+        }
+    }
+
+    private func handlePreview(entry: LiveConversationEntry, hovering: Bool) {
+        if hovering {
+            self.model.setPreviewSessionId(entry.session.sessionId, provider: entry.provider)
+        } else {
+            switch entry.provider {
+            case .codex:
+                if self.model.previewCodexSessionId == entry.session.sessionId {
+                    self.model.setPreviewSessionId(nil, provider: .codex)
+                }
+            case .claude:
+                if self.model.previewClaudeSessionId == entry.session.sessionId {
+                    self.model.setPreviewSessionId(nil, provider: .claude)
+                }
+            }
+        }
+    }
+
+    private func togglePin(entry: LiveConversationEntry) {
+        let isPinned: Bool
+        switch entry.provider {
+        case .codex:
+            isPinned = self.model.pinnedCodexSessionId == entry.session.sessionId
+        case .claude:
+            isPinned = self.model.pinnedClaudeSessionId == entry.session.sessionId
+        }
+        self.model.setPinnedSessionId(
+            isPinned ? nil : entry.session.sessionId,
+            provider: entry.provider)
+        if isPinned {
+            self.model.setPreviewSessionId(nil, provider: entry.provider)
+        }
+    }
+}
+
+private struct LiveConversationChip: View {
+    let entry: LiveConversationEntry
+    let isActive: Bool
+    let isPinned: Bool
+    let isPreview: Bool
+    let onPreview: (Bool) -> Void
+    let onTogglePin: () -> Void
+
+    @State private var hovered = false
+    @State private var flashGlow: Double = 0
+    @State private var scale: Double = 1.0
+
+    private static let hoverSpring: Animation = .spring(response: 0.28, dampingFraction: 0.80)
+    private static let glowPeak: Animation = .timingCurve(0.42, 0, 0.58, 1, duration: 0.20)
+    private static let glowFade: Animation = .timingCurve(0.20, 0.75, 0.45, 1, duration: 0.95)
+
+    private var isHighlighted: Bool {
+        self.isActive || self.isPinned || self.isPreview || self.hovered
+    }
+
+    private var label: String {
+        if let name = self.entry.session.displayName, !name.isEmpty {
+            return name
+        }
+        return "Untitled"
+    }
+
+    private var providerMark: String {
+        switch self.entry.provider {
+        case .codex: return "CX"
+        case .claude: return "CC"
+        }
+    }
+
+    private var tone: Color {
+        if self.isPinned { return NotchPalette.accent }
+        if self.isPreview { return NotchPalette.live }
+        if self.isActive { return NotchPalette.live }
+        return NotchPalette.tertiaryText
+    }
+
+    var body: some View {
+        Button(action: self.commitToggle) {
+            HStack(spacing: 5) {
+                Image(systemName: self.isPinned ? "pin.fill" : "text.bubble.fill")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(self.tone)
+                    .frame(width: 12)
+
+                Text(self.label)
+                    .font(.geist(size: 9, weight: self.isHighlighted ? .semibold : .medium))
+                    .foregroundStyle(self.isHighlighted
+                        ? NotchPalette.primaryText
+                        : NotchPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .minimumScaleFactor(0.72)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text(self.providerMark)
+                    .font(.geistMono(size: 6.5, weight: .bold))
+                    .foregroundStyle(self.tone.opacity(0.82))
+                    .frame(width: 14, alignment: .trailing)
+            }
+            .frame(maxWidth: .infinity, minHeight: 24, maxHeight: 24, alignment: .leading)
+            .padding(.horizontal, 6)
+            .background(self.background)
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(self.scale)
+        .help(self.helpText)
+        .onHover(perform: self.handleHover)
+    }
+
+    @ViewBuilder
+    private var background: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(self.isHighlighted
+                ? Color.white.opacity(0.075)
+                : Color.white.opacity(0.035))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(self.strokeColor, lineWidth: 1)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(NotchPalette.accent.opacity(self.flashGlow * 0.10))
+            }
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(NotchPalette.accent.opacity(self.flashGlow * 0.16))
+                    .blur(radius: 6)
+                    .scaleEffect(1 + self.flashGlow * 0.08)
+            }
+    }
+
+    private var strokeColor: Color {
+        if self.isPinned { return NotchPalette.accent.opacity(0.48) }
+        if self.isPreview { return NotchPalette.live.opacity(0.35) }
+        if self.isActive { return NotchPalette.live.opacity(0.22) }
+        return Color.white.opacity(0.07)
+    }
+
+    private var helpText: String {
+        let name = self.entry.session.displayName ?? "Untitled conversation"
+        return "\(name) · \(self.entry.session.projectName) · \(self.entry.provider.displayName)"
+    }
+
+    private func handleHover(_ hovering: Bool) {
+        withAnimation(Self.hoverSpring) {
+            self.hovered = hovering
+            if self.scale < 1.05 {
+                self.scale = hovering ? 1.035 : 1.0
+            }
+        }
+        if hovering {
+            self.onPreview(true)
+        } else {
+            self.onPreview(false)
+        }
+    }
+
+    private func commitToggle() {
+        self.fireConfirm()
+        HapticGate.perform(self.isPinned ? .alignment : .levelChange)
+        self.onTogglePin()
+    }
+
+    private func fireConfirm() {
+        withAnimation(Self.glowPeak) {
+            self.flashGlow = 1
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(160))
+            withAnimation(Self.glowFade) {
+                self.flashGlow = 0
+                self.scale = self.hovered ? 1.035 : 1.0
+            }
+        }
+    }
+}
+
+private struct RunwayBucketRow: View {
+    let model: MenuBarModel
+
+    private var snapshot: ProviderUsageSnapshot? {
+        self.model.selectedSnapshot
+    }
+
+    private var workContext: WorkContextSnapshot? {
+        self.snapshot?.workContext
+    }
+
+    private var pattern: MenuBarModel.TurnPattern? {
+        guard let snapshot else { return nil }
+        let p = self.model.turnPattern(
+            forSessionId: snapshot.workContext?.sessionId,
+            provider: snapshot.kind)
+        return p.hasEnoughData ? p : nil
+    }
+
+    private var smallBucket: Int {
+        guard let pattern else { return WorkContextSnapshot.RoomFor.smallSize }
+        return max(2_000, Int(Double(pattern.avg) * 0.4))
+    }
+
+    private var mediumBucket: Int {
+        guard let pattern else { return WorkContextSnapshot.RoomFor.mediumSize }
+        return max(6_000, pattern.avg)
+    }
+
+    private var largeBucket: Int {
+        guard let pattern else { return WorkContextSnapshot.RoomFor.largeSize }
+        return max(20_000, max(pattern.p90, Int(Double(pattern.avg) * 2.5)))
+    }
+
+    var body: some View {
+        if let context = self.workContext {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 7) {
+                    Text("MESSAGE ROOM")
+                        .font(.geist(size: 8, weight: .bold))
+                        .foregroundStyle(NotchPalette.tertiaryText)
+                        .tracking(1.2)
+                    Text(self.sourceLine)
+                        .font(.geist(size: 9, weight: .medium))
+                        .foregroundStyle(NotchPalette.secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.76)
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 0) {
+                    BucketChipNotch(
+                        count: max(0, context.contextRemainingTokens / self.smallBucket),
+                        label: "small",
+                        size: "~\(compactTokens(self.smallBucket))")
+                    BucketSepNotch()
+                    BucketChipNotch(
+                        count: max(0, context.contextRemainingTokens / self.mediumBucket),
+                        label: "medium",
+                        size: "~\(compactTokens(self.mediumBucket))")
+                    BucketSepNotch()
+                    BucketChipNotch(
+                        count: max(0, context.contextRemainingTokens / self.largeBucket),
+                        label: "large",
+                        size: "~\(compactTokens(self.largeBucket))")
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(0.032))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                    }
+            }
+        }
+    }
+
+    private var sourceLine: String {
+        if let pattern {
+            let sampleWord = pattern.samples.count == 1 ? "turn" : "turns"
+            return "based on last \(pattern.samples.count) \(sampleWord) · avg \(compactTokens(pattern.avg))"
+        }
+        return "learning your pace · using default turn sizes"
+    }
+}
+
+private struct RunwayCompactSignalRow: View {
+    let state: NotchDisplayState
+
+    var body: some View {
+        HStack(spacing: 6) {
+            self.item(
+                label: "bottleneck",
+                value: self.state.bottleneckLabel,
+                detail: self.state.bottleneckDetail,
+                symbol: "speedometer",
+                tone: self.state.bottleneckTone)
+
+            Divider()
+                .overlay(Color.white.opacity(0.10))
+                .frame(height: 20)
+
+            self.item(
+                label: "last turn",
+                value: self.state.lastTurnImpactValue,
+                detail: self.state.lastTurnImpactDetail,
+                symbol: "arrow.up.right",
+                tone: self.state.lastTurnImpactTone)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.032))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.07), lineWidth: 1)
+                }
+        }
+    }
+
+    private func item(
+        label: String,
+        value: String,
+        detail: String,
+        symbol: String,
+        tone: UsageTone) -> some View
+    {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.tone(tone))
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(label.uppercased())
+                        .font(.geist(size: 7, weight: .bold))
+                        .foregroundStyle(NotchPalette.tertiaryText)
+                        .tracking(1.0)
+                    Text(value)
+                        .font(.geistMono(size: 9, weight: .semibold))
+                        .foregroundStyle(NotchPalette.primaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.74)
+                }
+                Text(detail)
+                    .font(.geist(size: 8, weight: .medium))
+                    .foregroundStyle(NotchPalette.secondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct RunwayAdvisorRibbon: View {
+    let eyebrow: String
+    let title: String
+    let detail: String
+    let symbol: String
+    let tone: UsageTone
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 9) {
+            Image(systemName: self.symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(NotchPalette.tone(self.tone))
+                .frame(width: 24, height: 24)
+                .background(NotchPalette.tone(self.tone).opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(self.eyebrow.uppercased())
+                    .font(.geist(size: 7, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.2)
+                Text(self.title)
+                    .font(.geist(size: 11, weight: .semibold))
+                    .foregroundStyle(NotchPalette.primaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                if !self.detail.isEmpty {
+                    Text(self.detail)
+                        .font(.geist(size: 9, weight: .medium))
+                        .foregroundStyle(NotchPalette.secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.075), lineWidth: 1)
+                }
+        }
+    }
+}
+
+private struct RunwayPlanStrip: View {
+    let state: NotchDisplayState
+    let model: MenuBarModel
+
+    var body: some View {
+        let items = self.items
+        if !items.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    RunwayPlanPill(label: item.label, value: item.value)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private var items: [(label: String, value: String)] {
+        var result: [(String, String)] = []
+        if let projected = self.state.advisorProjectedTurns {
+            result.append(("forecast", "\(projected) turns"))
+        } else if self.state.turnAvgTokens > 0 {
+            result.append(("avg turn", compactTokens(self.state.turnAvgTokens)))
+        }
+        if !self.state.advisorResetPlan.isEmpty {
+            result.append(("reset", self.state.advisorResetPlan))
+        } else if self.state.fiveHour != nil || self.state.weekly != nil {
+            result.append(("caps", self.state.capSummary))
+        }
+        if let peak = self.state.peakHourLabel, !peak.isEmpty {
+            result.append(("peak", peak))
+        }
+        if let credit = self.model.selectedSnapshot?.creditBalance {
+            result.append(("credits", String(format: "%.0f", credit)))
+        }
+        if self.state.turnsToday > 0 {
+            result.append(("today", "\(self.state.turnsToday) turns"))
+        }
+        return Array(result.prefix(4))
+    }
+}
+
+private struct RunwayPlanPill: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(self.label.uppercased())
+                .font(.geist(size: 7, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(1.0)
+            Text(self.value)
+                .font(.geist(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(Color.white.opacity(0.05), in: Capsule())
     }
 }
 
@@ -2585,6 +4542,34 @@ private struct PulsingLiveDot: View {
     }
 }
 
+private struct ClosedNotchCue: View {
+    let label: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(self.color)
+                .frame(width: 4, height: 4)
+            Text(self.label)
+                .font(.geistMono(size: 8, weight: .semibold))
+                .foregroundStyle(self.color)
+                .tracking(0.7)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background {
+            Capsule()
+                .fill(self.color.opacity(0.10))
+                .overlay {
+                    Capsule().stroke(self.color.opacity(0.22), lineWidth: 1)
+                }
+        }
+    }
+}
+
 private struct NowStatTile: View {
     let label: String
     let value: String
@@ -2617,95 +4602,75 @@ private struct NowStatTile: View {
     }
 }
 
-/// Strava-style hero block — STATE on top (big % + verdict +
-/// recommendation), TRAJECTORY as the third line ("hits cap 14:32 ·
-/// 12 turns left"). One cohesive block; the eye reads top-to-bottom
-/// and lands on the actionable forecast right where it should.
+private struct DecisionChip: View {
+    let label: String
+    let value: String
+    let icon: String
+    let tone: UsageTone
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: self.icon)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(NotchPalette.tone(self.tone))
+            Text(self.label)
+                .font(.geist(size: 8, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(0.9)
+            Text(self.value)
+                .font(.geist(size: 9, weight: .semibold))
+                .foregroundStyle(NotchPalette.secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background {
+            Capsule()
+                .fill(NotchPalette.tone(self.tone).opacity(0.08))
+                .overlay {
+                    Capsule()
+                        .stroke(NotchPalette.tone(self.tone).opacity(0.18), lineWidth: 1)
+                }
+        }
+    }
+}
+
+/// Runway-first hero: one large remaining-work number, one action
+/// sentence, then the current bottleneck and last-turn impact.
 private struct VerdictHero: View {
     let state: NotchDisplayState
     let model: MenuBarModel
 
-    /// Session picker is only useful when (a) we're viewing Claude
-    /// (only Claude is pinnable in the watcher path) and (b) there
-    /// are 2+ unique live sessions to choose from.
-    private var canPickClaudeSession: Bool {
-        self.model.selectedProvider == .claude
-            && self.uniqueClaudeSessions.count >= 2
-    }
-
-    private var uniqueClaudeSessions: [LiveSession] {
-        var seen: Set<String> = []
-        var result: [LiveSession] = []
-        for session in self.state.liveClaudeSessions where !seen.contains(session.sessionId) {
-            seen.insert(session.sessionId)
-            result.append(session)
-        }
-        return result
-    }
-
-    private var titleText: String {
-        if self.state.hasAdvisor { return self.state.advisorHealthTitle }
-        if !self.state.hasContext {
-            return self.state.depletedTitle != nil ? "Rate limited" : "Cold start"
-        }
-        return self.state.verdictTitle
-    }
-
-    private var subtitleText: String {
-        if self.state.hasAdvisor { return self.state.advisorRecommendation }
-        if !self.state.hasContext {
-            return self.state.depletedTitle != nil ? "waiting for window to reset" : "open Claude Code or Codex to begin"
-        }
-        return self.state.verdictDetail
-    }
-
-    private var hasTrajectory: Bool {
-        self.state.hasAdvisor &&
-            (!self.state.advisorForecast.isEmpty || self.state.advisorProjectedTurns != nil)
-    }
-
-    /// % of the context window the last turn actually added.
-    /// Pulled from the model's rolling turn-delta history (which
-    /// `detectFireEvents` builds by diffing `contextUsedTokens`
-    /// poll-over-poll). The provider advisor has its own estimate,
-    /// but this path keeps the notch tied to the same observed deltas
-    /// used for the turn buckets.
-    private var lastTurnDeltaPercent: Double? {
-        guard let snap = self.model.selectedSnapshot,
-              let ctx = snap.workContext,
-              ctx.contextWindowTokens > 0
-        else { return nil }
-        let pattern = self.model.turnPattern(
-            forSessionId: ctx.sessionId, provider: snap.kind)
-        guard let lastDelta = pattern.samples.last
-        else { return nil }
-        return Double(lastDelta) / Double(ctx.contextWindowTokens) * 100
-    }
-
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(self.state.hasContext
-                    ? "\(Int(self.state.contextPercent.rounded()))"
-                    : "—")
-                    .font(.geistMono(size: 40, weight: .semibold))
-                    .foregroundStyle(NotchPalette.tone(self.state.contextTone))
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(self.state.runwayValue)
+                    .font(.geistMono(size: 36, weight: .semibold))
+                    .foregroundStyle(NotchPalette.tone(self.state.bottleneckTone))
                     .contentTransition(.numericText())
                     .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                Text("%")
-                    .font(.geistMono(size: 16, weight: .medium))
-                    .foregroundStyle(NotchPalette.tone(self.state.contextTone).opacity(0.6))
+                    .minimumScaleFactor(0.56)
+                Text(self.state.runwayUnit.uppercased())
+                    .font(.geist(size: 8, weight: .bold))
+                    .foregroundStyle(NotchPalette.tertiaryText)
+                    .tracking(1.1)
+                    .lineLimit(1)
             }
-            .fixedSize()
+            .frame(width: 96, alignment: .trailing)
+
+            Rectangle()
+                .fill(NotchPalette.tone(self.state.bottleneckTone).opacity(0.18))
+                .frame(width: 1, height: 50)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(self.titleText)
+                Text(self.state.runwayTitle)
                     .font(.geist(size: 17, weight: .bold))
                     .foregroundStyle(NotchPalette.primaryText)
                     .lineLimit(1)
                     .contentTransition(.opacity)
-                Text(self.subtitleText)
+                Text(self.state.nextAction)
                     .font(.geist(size: 11))
                     .foregroundStyle(NotchPalette.secondaryText)
                     .lineLimit(1)
@@ -2737,123 +4702,50 @@ private struct VerdictHero: View {
                     }
                 }
 
-                // Context facts — `~N msgs · used / total`. Lifted from
-                // the menu bar's hero, where this answers the live
-                // "how much room do I actually have?" question. The
-                // % alone is abstract; the absolute numbers calibrate
-                // the gut over time, and `~msgs` is the closest thing
-                // to a runway estimate for the active conversation.
+                // Context facts stay secondary: the runway number
+                // leads, raw used/total and cap pressure explain it.
                 if self.state.hasContext,
                    let ctx = self.model.selectedSnapshot?.workContext
                 {
                     HStack(spacing: 5) {
-                        if let msgs = ctx.estimatedMessagesRemaining {
-                            Text("~\(msgs) msgs")
-                                .font(.geistMono(size: 10, weight: .semibold))
-                                .foregroundStyle(NotchPalette.secondaryText)
-                                .contentTransition(.numericText())
-                            Text("·")
-                                .font(.geist(size: 10))
-                                .foregroundStyle(NotchPalette.tertiaryText)
-                        }
+                        Text("\(Int(ctx.contextUsedPercent.rounded()))% used")
+                            .font(.geistMono(size: 10, weight: .semibold))
+                            .foregroundStyle(NotchPalette.secondaryText)
+                            .contentTransition(.numericText())
+                        Text("·")
+                            .font(.geist(size: 10))
+                            .foregroundStyle(NotchPalette.tertiaryText)
                         Text("\(compactTokens(ctx.contextUsedTokens)) / \(compactTokens(ctx.contextWindowTokens))")
                             .font(.geistMono(size: 10))
                             .foregroundStyle(NotchPalette.tertiaryText)
-                        // Last-turn share — computed as the DELTA of
-                        // contextUsedTokens between the previous and
-                        // current poll, divided by the window size.
-                        // We read from the model's turn-pattern
-                        // history so this line matches the bucket
-                        // forecast below.
-                        if let lastDelta = self.lastTurnDeltaPercent,
-                           lastDelta > 0
-                        {
-                            Text("·")
-                                .font(.geist(size: 10))
-                                .foregroundStyle(NotchPalette.tertiaryText)
-                            Text("last turn \(Int(lastDelta.rounded()))%")
-                                .font(.geistMono(size: 10))
-                                .foregroundStyle(NotchPalette.tertiaryText)
-                                .contentTransition(.numericText())
-                        }
+                        Text("·")
+                            .font(.geist(size: 10))
+                            .foregroundStyle(NotchPalette.tertiaryText)
+                        Text(self.state.capSummary)
+                            .font(.geist(size: 10))
+                            .foregroundStyle(NotchPalette.tertiaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
 
-                if self.hasTrajectory {
-                    HStack(spacing: 5) {
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(NotchPalette.tone(self.state.advisorTone))
-
-                        if let turns = self.state.advisorProjectedTurns {
-                            Text("\(turns)")
-                                .font(.geistMono(size: 11, weight: .semibold))
-                                .foregroundStyle(NotchPalette.primaryText)
-                                .contentTransition(.numericText())
-                            Text("turn\(turns == 1 ? "" : "s") until cap")
-                                .font(.geist(size: 11))
-                                .foregroundStyle(NotchPalette.secondaryText)
-                        }
-
-                        if !self.state.advisorForecast.isEmpty {
-                            if self.state.advisorProjectedTurns != nil {
-                                Text("·")
-                                    .font(.geist(size: 11))
-                                    .foregroundStyle(NotchPalette.tertiaryText)
-                            }
-                            Text(self.state.advisorForecast)
-                                .font(.geist(size: 11))
-                                .foregroundStyle(NotchPalette.tertiaryText)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                    }
-                    .padding(.top, 1)
+                HStack(spacing: 6) {
+                    DecisionChip(
+                        label: self.state.bottleneckLabel,
+                        value: self.state.bottleneckDetail,
+                        icon: "speedometer",
+                        tone: self.state.bottleneckTone)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    DecisionChip(
+                        label: "LAST TURN",
+                        value: "\(self.state.lastTurnImpactValue) · \(self.state.lastTurnImpactDetail)",
+                        icon: "arrow.up.right",
+                        tone: self.state.lastTurnImpactTone)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                // resetPlan — advisor's "what to do until reset" tip.
-                // Tertiary, sits as the quietest line of the hero.
-                if self.state.hasAdvisor, !self.state.advisorResetPlan.isEmpty {
-                    Text(self.state.advisorResetPlan)
-                        .font(.geist(size: 10))
-                        .foregroundStyle(NotchPalette.tertiaryText)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                .padding(.top, 2)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            // Conversation pills — one per detected live Claude
-            // session, max 5. Hover any pill to preview that session's
-            // context (the alcove fetches and displays its data
-            // without committing). Click toggles pin: same pill
-            // clicked twice = unpin. Branch chip removed; this column
-            // is now dedicated to switching between live sessions.
-            if self.canPickClaudeSession {
-                VStack(alignment: .trailing, spacing: 3) {
-                    ForEach(self.uniqueClaudeSessions.prefix(5)) { session in
-                        SessionPill(
-                            session: session,
-                            isPinned: self.model.pinnedClaudeSessionId == session.sessionId,
-                            isPreview: self.model.previewClaudeSessionId == session.sessionId,
-                            onHover: { hovering in
-                                if hovering {
-                                    self.model.setPreviewClaudeSessionId(session.sessionId)
-                                } else if self.model.previewClaudeSessionId == session.sessionId {
-                                    self.model.setPreviewClaudeSessionId(nil)
-                                }
-                            },
-                            onClick: {
-                                let isCurrentlyPinned = self.model.pinnedClaudeSessionId == session.sessionId
-                                HapticGate.perform(
-                                    isCurrentlyPinned ? .alignment : .levelChange)
-                                self.model.setPinnedClaudeSessionId(
-                                    isCurrentlyPinned ? nil : session.sessionId)
-                            })
-                    }
-                }
-                .fixedSize()
-            }
         }
     }
 }
@@ -3496,6 +5388,26 @@ private struct ContextChip: View {
     }
 }
 
+private struct CapsHeader: View {
+    let summary: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Text("USAGE CAPS")
+                .font(.geist(size: 8, weight: .bold))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .tracking(1.2)
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+            Text(self.summary)
+                .font(.geistMono(size: 8, weight: .medium))
+                .foregroundStyle(NotchPalette.tertiaryText)
+                .lineLimit(1)
+        }
+    }
+}
+
 /// Compact meter row for a rate-limit window. Label + bar + % + reset
 /// time, all on one line. Modeled on the menu bar's `WindowRow`.
 private struct WindowMeterRow: View {
@@ -3613,6 +5525,26 @@ private struct NotchWindowForecastLine: View {
         (self.forecast.projectedAtResetPercent ?? 0) > 100
     }
 
+    private var primaryText: String {
+        if self.forecast.aheadOfPacePercent >= 2 {
+            return "\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of pace"
+        }
+        if self.forecast.fairPaceReservePercent >= 2 {
+            return "\(Int(self.forecast.fairPaceReservePercent.rounded()))% in reserve"
+        }
+        return "on fair pace"
+    }
+
+    private var primaryTone: Color {
+        if self.trendsOver || self.forecast.aheadOfPacePercent >= 2 {
+            return NotchPalette.toneTight
+        }
+        if self.forecast.fairPaceReservePercent >= 2 {
+            return NotchPalette.live
+        }
+        return NotchPalette.toneWatch
+    }
+
     private var hasMeaningfulProjection: Bool {
         guard let proj = self.forecast.projectedAtResetPercent else { return false }
         return abs(proj - self.percent) >= 1
@@ -3622,11 +5554,9 @@ private struct NotchWindowForecastLine: View {
         HStack(spacing: 5) {
             Spacer().frame(width: 86)
 
-            Text("\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of pace")
+            Text(self.primaryText)
                 .font(.geist(size: 9, weight: .semibold))
-                .foregroundStyle(self.trendsOver
-                    ? NotchPalette.toneTight
-                    : NotchPalette.toneWatch)
+                .foregroundStyle(self.primaryTone)
 
             if self.hasMeaningfulProjection {
                 Text("·")
@@ -3637,6 +5567,16 @@ private struct NotchWindowForecastLine: View {
                     Text(runsOut)
                         .font(.geist(size: 9))
                         .foregroundStyle(NotchPalette.toneTight)
+                } else if let over = self.forecast.projectedOverPercent {
+                    Text("\(over)% over if pace holds")
+                        .font(.geist(size: 9))
+                        .foregroundStyle(NotchPalette.toneTight)
+                } else if let reserve = self.forecast.projectedReservePercent,
+                          reserve >= 1
+                {
+                    Text("\(Int(reserve.rounded()))% reserve if pace holds")
+                        .font(.geist(size: 9))
+                        .foregroundStyle(NotchPalette.live)
                 } else if let proj = self.forecast.projectedAtResetPercent {
                     Text("trending to \(Int(proj.rounded()))% by reset")
                         .font(.geist(size: 9))
@@ -4236,71 +6176,6 @@ private struct BurnTool: View {
     }
 }
 
-// MARK: - PATTERNS / WRAP / HEALTH tools
-//
-// These three reuse the menu bar's tab views directly so the alcove
-// stays in feature parity with the menu bar without a duplicate
-// implementation. Each is wrapped in a fixed-height frame so the
-// inner ScrollView scrolls within the alcove drawer instead of
-// overflowing past the maxDrawerHeight cap.
-//
-// The horizontal padding is negated (-16) because the menu bar views
-// add their own contentPadding while AlcoveContent already pads 32pt
-// — without the negation we'd lose ~32pt of inner width to nothing.
-
-/// Drawer height the inner ScrollView is constrained to. Sits below
-/// `NotchMorphHost.maxDrawerHeight` (420) by enough to leave room for
-/// the alcove's tool strip and outer paddings.
-private let alcoveScrollableHeight: CGFloat = 320
-
-/// Wrap a menu-bar tab view so it fits inside the alcove drawer:
-/// fixed height + edge negation so it occupies the full inner width.
-private struct AlcoveTabHost<Content: View>: View {
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        self.content()
-            .padding(.horizontal, -16)
-            .frame(height: alcoveScrollableHeight)
-    }
-}
-
-private struct PatternsTool: View {
-    let model: MenuBarModel
-
-    var body: some View {
-        if let snapshot = self.model.selectedSnapshot {
-            AlcoveTabHost { PatternsView(snapshot: snapshot) }
-        } else {
-            EmptyTool(message: "No patterns yet — open Claude Code or Codex")
-        }
-    }
-}
-
-private struct WrapTool: View {
-    let model: MenuBarModel
-
-    var body: some View {
-        if let snapshot = self.model.selectedSnapshot {
-            AlcoveTabHost { WrapView(snapshot: snapshot) }
-        } else {
-            EmptyTool(message: "No wrap yet — use it for a few days")
-        }
-    }
-}
-
-private struct HealthTool: View {
-    let model: MenuBarModel
-
-    var body: some View {
-        if let snapshot = self.model.selectedSnapshot {
-            AlcoveTabHost { HealthView(snapshot: snapshot) }
-        } else {
-            EmptyTool(message: "No health data — waiting for your first session")
-        }
-    }
-}
-
 /// Section header used inside BURN to introduce TODAY / MONTH zones.
 /// Tracking-spaced label on the left, hairline filling the rest.
 private struct BurnSectionDivider: View {
@@ -4542,70 +6417,102 @@ private struct FireBanner: View {
     }
 }
 
-private struct NotchThresholdToast: View {
+private struct NotchThresholdSheet: View {
     let alert: NotchThresholdAlert
+    let notchWidth: CGFloat
+    let notchHeight: CGFloat
 
     private var tint: Color {
         NotchPalette.tone(self.alert.tone)
     }
 
-    var body: some View {
-        HStack(spacing: 9) {
-            ZStack {
-                Circle()
-                    .fill(self.tint.opacity(0.18))
-                Image(systemName: self.alert.symbol)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(self.tint)
-            }
-            .frame(width: 24, height: 24)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(self.alert.title)
-                    .font(.geist(size: 10, weight: .bold))
-                    .tracking(1.0)
-                    .foregroundStyle(NotchPalette.primaryText)
-                    .lineLimit(1)
-                Text(self.alert.detail)
-                    .font(.geist(size: 10, weight: .medium))
-                    .foregroundStyle(NotchPalette.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.leading, 8)
-        .padding(.trailing, 11)
-        .padding(.vertical, 7)
-        .frame(width: 310, alignment: .leading)
-        .background {
-            Capsule()
-                .fill(Color.black.opacity(0.92))
-                .overlay {
-                    Capsule()
-                        .stroke(self.tint.opacity(0.42), lineWidth: 1)
-                }
-        }
-        .shadow(color: Color.black.opacity(0.35), radius: 18, y: 8)
+    private var sheetWidth: CGFloat {
+        min(390, max(316, self.notchWidth + 136))
     }
-}
 
-// MARK: - Empty tool placeholder
-
-private struct EmptyTool: View {
-    let message: String
+    private var sheetHeight: CGFloat {
+        max(86, self.notchHeight + 58)
+    }
 
     var body: some View {
-        HStack {
-            Spacer()
-            Text(self.message)
-                .font(.geist(size: 11))
-                .foregroundStyle(NotchPalette.tertiaryText)
-                .multilineTextAlignment(.center)
-            Spacer()
+        ZStack(alignment: .top) {
+            NotchShape(topCornerRadius: 6, bottomCornerRadius: 18)
+                .fill(.black)
+                .overlay {
+                    NotchShape(topCornerRadius: 6, bottomCornerRadius: 18)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
+                .overlay(alignment: .bottom) {
+                    Capsule()
+                        .fill(self.tint)
+                        .frame(width: min(self.sheetWidth - 72, 156), height: 2)
+                        .opacity(0.82)
+                        .offset(y: -5)
+                }
+
+            VStack(spacing: 0) {
+                Color.clear
+                    .frame(height: max(25, self.notchHeight - 2))
+
+                HStack(spacing: 11) {
+                    ZStack {
+                        Circle()
+                            .fill(self.tint.opacity(0.13))
+                        Image(systemName: self.alert.symbol)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(self.tint)
+                    }
+                    .frame(width: 28, height: 28)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(self.alert.title)
+                            .font(.geist(size: 11, weight: .bold))
+                            .tracking(0.8)
+                            .foregroundStyle(NotchPalette.primaryText)
+                            .lineLimit(1)
+                        Text(self.alert.detail)
+                            .font(.geist(size: 10, weight: .medium))
+                            .foregroundStyle(NotchPalette.secondaryText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Circle()
+                        .fill(self.tint)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: self.tint.opacity(0.55), radius: 5)
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 14)
+            }
         }
-        .padding(.vertical, 30)
+        .frame(width: self.sheetWidth, height: self.sheetHeight)
+        .clipShape(NotchShape(topCornerRadius: 6, bottomCornerRadius: 18))
+        .overlay(alignment: .top) {
+            // Masks the real hardware notch area so the alert reads as
+            // the silhouette extending downward, not a detached card.
+            Rectangle()
+                .fill(.black)
+                .frame(width: min(self.notchWidth, self.sheetWidth), height: self.notchHeight)
+                .mask {
+                    NotchShape(topCornerRadius: 6, bottomCornerRadius: 14)
+                        .frame(width: min(self.notchWidth, self.sheetWidth), height: self.notchHeight)
+                }
+                .allowsHitTesting(false)
+        }
+        .overlay(alignment: .top) {
+            if self.notchHeight > 32 {
+                Capsule()
+                    .fill(self.tint.opacity(0.58))
+                    .frame(width: max(28, min(self.notchWidth - 36, 96)), height: 1.5)
+                    .offset(y: max(20, self.notchHeight - 7))
+                    .allowsHitTesting(false)
+            }
+        }
+        .shadow(color: Color.black.opacity(0.48), radius: 24, y: 12)
+        .shadow(color: self.tint.opacity(0.08), radius: 18, y: 8)
     }
 }
 
@@ -4617,7 +6524,7 @@ private struct DevPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ToastDebugSection(onTrigger: self.onTriggerDebugAlert)
+            NotchAlertDebugSection(onTrigger: self.onTriggerDebugAlert)
             CalibrationSection(model: self.model)
             HapticToggleSection(model: self.model)
             ExpandStylePicker(model: self.model)
@@ -4625,7 +6532,7 @@ private struct DevPanel: View {
     }
 }
 
-private struct ToastDebugSection: View {
+private struct NotchAlertDebugSection: View {
     let onTrigger: (NotchThresholdAlert) -> Void
     @State private var cycleIndex = 0
 
@@ -4689,7 +6596,7 @@ private struct ToastDebugSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Text("TOAST LAB")
+                Text("NOTCH ALERT LAB")
                     .font(.geist(size: 8, weight: .bold))
                     .foregroundStyle(NotchPalette.tertiaryText)
                     .tracking(1.2)
@@ -5136,27 +7043,6 @@ private struct AlcoveTopRow: View {
     /// snapshots — otherwise there's nothing to switch to.
     private var canSwitchProvider: Bool {
         self.model.overview.snapshots.count > 1
-    }
-
-    /// Session picker shows when (a) we're viewing Claude (only Claude
-    /// is pinnable in the watcher path) and (b) there are 2+ unique
-    /// live Claude sessions to choose from. Single-session users see
-    /// a plain label.
-    private var canPickClaudeSession: Bool {
-        self.model.selectedProvider == .claude
-            && self.uniqueClaudeSessions.count >= 2
-    }
-
-    /// Dedupe the live Claude session list by sessionId so the menu
-    /// doesn't show the same project twice if a session restarted.
-    private var uniqueClaudeSessions: [LiveSession] {
-        var seen: Set<String> = []
-        var result: [LiveSession] = []
-        for session in self.state.liveClaudeSessions where !seen.contains(session.sessionId) {
-            seen.insert(session.sessionId)
-            result.append(session)
-        }
-        return result
     }
 
     var body: some View {

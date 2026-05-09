@@ -1,4 +1,5 @@
 import BurnrateCore
+import Darwin
 import Foundation
 import Observation
 import SwiftUI
@@ -231,6 +232,74 @@ enum MenuBarModule: String, CaseIterable, Identifiable {
     }
 }
 
+/// How much the menu-bar anchor should show. The notch is the primary
+/// product surface now, so the status item can stay as quiet as the user
+/// wants while still giving quick access to settings.
+enum MenuBarDisplayMode: String, CaseIterable, Identifiable, Hashable {
+    case iconOnly
+    case iconAndMetric
+    case metricStack
+
+    var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .iconOnly: "Icon"
+        case .iconAndMetric: "Icon + value"
+        case .metricStack: "Two-line"
+        }
+    }
+
+    var menuTitle: String {
+        switch self {
+        case .iconOnly: "Icon only"
+        case .iconAndMetric: "Icon and value"
+        case .metricStack: "Two-line metric"
+        }
+    }
+}
+
+/// Symbol style for the menu-bar anchor. SF Symbols are resolved at
+/// runtime so users can change the visible mark without changing what
+/// the notch itself shows.
+enum MenuBarIconStyle: String, CaseIterable, Identifiable, Hashable {
+    case flame
+    case provider
+    case gauge
+    case notch
+    case command
+
+    var id: String { self.rawValue }
+
+    var label: String {
+        switch self {
+        case .flame: "Flame"
+        case .provider: "Provider"
+        case .gauge: "Gauge"
+        case .notch: "Notch"
+        case .command: "Command"
+        }
+    }
+
+    func symbol(for provider: ProviderKind) -> String {
+        switch self {
+        case .flame:
+            return "flame.fill"
+        case .provider:
+            switch provider {
+            case .codex: return "terminal.fill"
+            case .claude: return "sparkles"
+            }
+        case .gauge:
+            return "gauge"
+        case .notch:
+            return "capsule.fill"
+        case .command:
+            return "command"
+        }
+    }
+}
+
 /// What the status item should render right now. The `label` is the
 /// abbreviated top-line text; `value` is the bottom-line value.
 struct MenuBarDisplay: Equatable {
@@ -238,6 +307,49 @@ struct MenuBarDisplay: Equatable {
     let value: String
 
     static let placeholder = MenuBarDisplay(label: "—", value: "—")
+}
+
+private final class LocalFileChangeWatcher: @unchecked Sendable {
+    private var sources: [URL: DispatchSourceFileSystemObject] = [:]
+    private let queue = DispatchQueue(label: "fyi.burnrate.identity-file-watcher")
+
+    func update(urls: Set<URL>, onChange: @escaping @Sendable () -> Void) {
+        let current = Set(self.sources.keys)
+        for url in current.subtracting(urls) {
+            self.remove(url)
+        }
+        for url in urls.subtracting(current) {
+            self.add(url, onChange: onChange)
+        }
+    }
+
+    func cancelAll() {
+        for source in self.sources.values {
+            source.cancel()
+        }
+        self.sources.removeAll()
+    }
+
+    private func add(_ url: URL, onChange: @escaping @Sendable () -> Void) {
+        let fd = open(url.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .attrib, .delete, .rename],
+            queue: self.queue)
+        source.setEventHandler(handler: onChange)
+        source.setCancelHandler {
+            close(fd)
+        }
+        self.sources[url] = source
+        source.resume()
+    }
+
+    private func remove(_ url: URL) {
+        guard let source = self.sources.removeValue(forKey: url) else { return }
+        source.cancel()
+    }
 }
 
 @MainActor
@@ -249,10 +361,17 @@ final class MenuBarModel {
     var isRefreshing = false
     var lastError: UsageError?
     var lastRefreshAt: Date?
+    private var lastPreviewRefreshAt: Date?
     var fireEvent: FireEvent?
     var alertMode: UsageAlertMode = UsageAlertMode(rawValue: UserDefaults.standard.string(forKey: UsageNotificationController.alertModeKey) ?? "") ?? .all
     var isLaunchAtLoginEnabled: Bool = LaunchAtLoginManager.isEnabled
     var selectedMenuBarModule: MenuBarModule = MenuBarModule(rawValue: UserDefaults.standard.string(forKey: MenuBarModel.menuBarModuleKey) ?? "") ?? .context
+    var menuBarDisplayMode: MenuBarDisplayMode = MenuBarDisplayMode(
+        rawValue: UserDefaults.standard.string(forKey: MenuBarModel.menuBarDisplayModeKey) ?? ""
+    ) ?? .iconAndMetric
+    var menuBarIconStyle: MenuBarIconStyle = MenuBarIconStyle(
+        rawValue: UserDefaults.standard.string(forKey: MenuBarModel.menuBarIconStyleKey) ?? ""
+    ) ?? .flame
     /// User-controlled toggle for the notch widget. Default is the
     /// negation of "is the user even on a notched MacBook" so notch-less
     /// users never see a stray rounded pill at the top of their screen.
@@ -283,11 +402,18 @@ final class MenuBarModel {
     /// launches so the pin survives restarts.
     var pinnedClaudeSessionId: String? = UserDefaults.standard.string(
         forKey: MenuBarModel.pinnedClaudeSessionIdKey)
+    /// Same interaction model as Claude, but for Codex rollout jsonl
+    /// files. Codex exposes conversation metadata through
+    /// `~/.codex/state_5.sqlite`, so the notch can lock onto a named
+    /// Codex thread instead of always following the newest rollout.
+    var pinnedCodexSessionId: String? = UserDefaults.standard.string(
+        forKey: MenuBarModel.pinnedCodexSessionIdKey)
     /// Transient — set while the user hovers a session pill so the
     /// alcove previews that session's context without committing to
     /// a pin. Takes priority over `pinnedClaudeSessionId` when set;
     /// clears when hover exits. Not persisted.
     var previewClaudeSessionId: String? = nil
+    var previewCodexSessionId: String? = nil
     /// Transient: true while the user is actively dragging the calibration
     /// handles on the notch silhouette. Not persisted. The presenter uses
     /// this to skip its expensive panel-rebuild path during drag ticks.
@@ -300,6 +426,8 @@ final class MenuBarModel {
 
     static let activeTabKey = "burnrate.activeTab"
     static let menuBarModuleKey = "burnrate.menuBarModule"
+    static let menuBarDisplayModeKey = "burnrate.menuBarDisplayMode"
+    static let menuBarIconStyleKey = "burnrate.menuBarIconStyle"
     static let notchEnabledKey = "burnrate.notchEnabled"
     static let alcoveChoreographyKey = "burnrate.alcoveChoreography"
     static let alcoveSpringKey = "burnrate.alcoveSpring"
@@ -307,6 +435,7 @@ final class MenuBarModel {
     static let notchWidthOverrideKey = "burnrate.notchWidthOverride"
     static let notchHeightOverrideKey = "burnrate.notchHeightOverride"
     static let pinnedClaudeSessionIdKey = "burnrate.pinnedClaudeSessionId"
+    static let pinnedCodexSessionIdKey = "burnrate.pinnedCodexSessionId"
 
     private static func loadOptionalDouble(forKey key: String) -> Double? {
         UserDefaults.standard.object(forKey: key) as? Double
@@ -478,18 +607,31 @@ final class MenuBarModel {
     /// Combined snapshot + forecast for a window. Built fresh on demand
     /// from `windowSamples` history — never cached.
     struct WindowForecast: Equatable {
+        /// Signed fair-pace delta. Positive means you're ahead of the
+        /// even-use line; negative means you have reserve.
+        let paceDeltaPercent: Double
+
         /// Model A — gap between current usage and even-pacing expectation
         /// at this point in the window. A snapshot, not a prediction.
         let aheadOfPacePercent: Double
+        let fairPaceReservePercent: Double
 
         /// Model B — projected usage at reset assuming the recent burn
         /// rate (last ~hour of samples) continues. Nil when we don't have
         /// enough history yet.
         let projectedAtResetPercent: Double?
+        let projectedReservePercent: Double?
 
         /// When current usage is projected to hit 100%, if the projection
         /// puts us over budget. Nil otherwise.
         let runsOutAt: Date?
+
+        var projectedOverPercent: Int? {
+            guard let projectedAtResetPercent,
+                  projectedAtResetPercent > 100
+            else { return nil }
+            return max(1, Int((projectedAtResetPercent - 100).rounded()))
+        }
     }
 
     /// Per-window sample history. Drives the recent-rate projection that
@@ -515,10 +657,17 @@ final class MenuBarModel {
 
     private let source = UsageSnapshotSource()
     private let notificationController = UsageNotificationController()
+    private let identityFileWatcher = LocalFileChangeWatcher()
+    private let previewContextWatcher = LocalFileChangeWatcher()
     private var hasStarted = false
     private var refreshTask: Task<Void, Never>?
     private var previewRefreshTask: Task<Void, Never>?
+    private var previewContextRefreshTask: Task<Void, Never>?
+    private var watchedIdentityRefreshTask: Task<Void, Never>?
     private var fireExpiryTask: Task<Void, Never>?
+    private var queuedRefreshAfterCurrent = false
+    private var queuedRefreshNeedsFull = false
+    private var queuedRefreshProvider: ProviderKind?
     /// Per-session prev-state trackers — keyed by sessionId, not
     /// provider, so switching between concurrent sessions doesn't
     /// produce nonsense diffs (session A at 50K → session B at 20K
@@ -537,6 +686,12 @@ final class MenuBarModel {
     /// recent burn rate, short enough that the projection follows
     /// behavioural shifts within an hour.
     private static let maxWindowHistory = 120
+    private static let watchReconcileInterval: Duration = .seconds(30)
+    private static let backgroundFullRefreshInterval: TimeInterval = 300
+    private static let watchedIdentityRefreshDebounce: Duration = .milliseconds(900)
+    private static let watchedIdentityMinimumSpacing: TimeInterval = 12
+    private static let previewContextRefreshDebounce: Duration = .milliseconds(350)
+    private static let previewContextMinimumSpacing: TimeInterval = 1.5
 
     private static func median(of values: [Int]) -> Int {
         guard !values.isEmpty else { return 0 }
@@ -573,6 +728,19 @@ final class MenuBarModel {
     func setMenuBarModule(_ module: MenuBarModule) {
         self.selectedMenuBarModule = module
         UserDefaults.standard.set(module.rawValue, forKey: Self.menuBarModuleKey)
+        self.onSnapshotChanged?()
+    }
+
+    func setMenuBarDisplayMode(_ mode: MenuBarDisplayMode) {
+        self.menuBarDisplayMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.menuBarDisplayModeKey)
+        self.onSnapshotChanged?()
+    }
+
+    func setMenuBarIconStyle(_ style: MenuBarIconStyle) {
+        self.menuBarIconStyle = style
+        UserDefaults.standard.set(style.rawValue, forKey: Self.menuBarIconStyleKey)
+        self.onSnapshotChanged?()
     }
 
     func setNotchEnabled(_ enabled: Bool) {
@@ -613,16 +781,35 @@ final class MenuBarModel {
     }
 
     func setPinnedClaudeSessionId(_ value: String?) {
-        self.pinnedClaudeSessionId = value
-        if let value {
-            UserDefaults.standard.set(value, forKey: Self.pinnedClaudeSessionIdKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.pinnedClaudeSessionIdKey)
+        self.setPinnedSessionId(value, provider: .claude)
+    }
+
+    func setPinnedSessionId(_ value: String?, provider: ProviderKind) {
+        switch provider {
+        case .claude:
+            self.pinnedClaudeSessionId = value
+            if let value {
+                UserDefaults.standard.set(value, forKey: Self.pinnedClaudeSessionIdKey)
+                self.pinnedCodexSessionId = nil
+                UserDefaults.standard.removeObject(forKey: Self.pinnedCodexSessionIdKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.pinnedClaudeSessionIdKey)
+            }
+        case .codex:
+            self.pinnedCodexSessionId = value
+            if let value {
+                UserDefaults.standard.set(value, forKey: Self.pinnedCodexSessionIdKey)
+                self.pinnedClaudeSessionId = nil
+                UserDefaults.standard.removeObject(forKey: Self.pinnedClaudeSessionIdKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.pinnedCodexSessionIdKey)
+            }
         }
+        self.selectedProvider = provider
         // Force-refresh — bypasses the isRefreshing guard so the
         // alcove updates instantly even if a poll happens to be in
         // flight when the user clicks.
-        Task { @MainActor in await self.refresh(force: true) }
+        Task { @MainActor in await self.refreshFocusedPreview(provider: provider) }
     }
 
     /// Set/clear the hover-preview session. Takes priority over the
@@ -630,17 +817,38 @@ final class MenuBarModel {
     /// (or auto-detect when no pin set). Triggers a force-refresh so
     /// the alcove fetches that session's data immediately.
     func setPreviewClaudeSessionId(_ value: String?) {
+        self.setPreviewSessionId(value, provider: .claude)
+    }
+
+    func setPreviewSessionId(_ value: String?, provider: ProviderKind) {
         // Avoid spamming refreshes when hover events fire repeatedly
         // for the same target.
-        guard self.previewClaudeSessionId != value else { return }
-        self.previewClaudeSessionId = value
+        switch provider {
+        case .claude:
+            guard self.previewClaudeSessionId != value else { return }
+            self.previewClaudeSessionId = value
+            if value != nil {
+                self.previewCodexSessionId = nil
+            }
+        case .codex:
+            guard self.previewCodexSessionId != value else { return }
+            self.previewCodexSessionId = value
+            if value != nil {
+                self.previewClaudeSessionId = nil
+            }
+        }
+        if value != nil {
+            self.selectedProvider = provider
+        }
+        self.updatePreviewContextWatchTarget(provider: provider, sessionId: value)
         // Cancel the previous preview fetch so rapid hover scrubbing
         // doesn't queue up stale results that would flicker through
         // the UI as each one completes. The refresh body itself also
         // guards on target-match before writing — belt + suspenders.
         self.previewRefreshTask?.cancel()
         self.previewRefreshTask = Task { @MainActor [weak self] in
-            await self?.refresh(force: true)
+            if Task.isCancelled { return }
+            await self?.refreshFocusedPreview(provider: provider)
         }
     }
 
@@ -651,6 +859,14 @@ final class MenuBarModel {
         } else {
             UserDefaults.standard.removeObject(forKey: Self.notchHeightOverrideKey)
         }
+        self.onSnapshotChanged?()
+    }
+
+    func resetNotchSizeOverrides() {
+        self.notchWidthOverride = nil
+        self.notchHeightOverride = nil
+        UserDefaults.standard.removeObject(forKey: Self.notchWidthOverrideKey)
+        UserDefaults.standard.removeObject(forKey: Self.notchHeightOverrideKey)
         self.onSnapshotChanged?()
     }
 
@@ -788,6 +1004,7 @@ final class MenuBarModel {
         let current = self.selectedProvider
         let next = available.first { $0 != current } ?? current
         self.selectedProvider = next
+        self.updateIdentityWatchTargets(for: self.overview)
         // The popover observes @Observable directly so it re-renders for
         // free, but the notch's NotchDisplayState only refreshes from
         // the snapshot hook — fire it so the alcove flips providers too.
@@ -800,28 +1017,60 @@ final class MenuBarModel {
         self.loadOverageHistory()
         self.refreshTask = Task {
             await self.notificationController.prepare()
-            await self.refresh()
+            await self.refreshFastInitialOverview()
+            try? await Task.sleep(for: .seconds(3))
+            if !Task.isCancelled, !self.isPreviewingSession {
+                await self.refresh(force: true)
+            }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
-                // Skip the tick while the user is hovering a
-                // conversation pill — preview is the override,
-                // a poll mid-hover would clobber whichever session
-                // they're scrubbing through.
-                if self.previewClaudeSessionId == nil {
+                try? await Task.sleep(for: Self.watchReconcileInterval)
+                guard !self.isPreviewingSession else { continue }
+
+                // Keep the lightweight identity watchers attached to
+                // the latest known sessions every 30s. The expensive
+                // analytics pass runs much less often as a safety net.
+                self.updateIdentityWatchTargets(for: self.overview)
+                let shouldRunFullRefresh = self.lastRefreshAt
+                    .map { Date().timeIntervalSince($0) >= Self.backgroundFullRefreshInterval }
+                    ?? true
+                if shouldRunFullRefresh {
                     await self.refresh()
                 }
             }
         }
     }
 
-    func refresh(force: Bool = false) async {
-        // The 30s polling loop should never collide with itself, but
-        // user-initiated refreshes (pin a session, toggle a setting)
-        // need to bypass the in-flight guard so the alcove updates
-        // immediately instead of waiting up to 30s for the next tick.
-        guard force || !self.isRefreshing else { return }
+    private var isPreviewingSession: Bool {
+        self.previewClaudeSessionId != nil || self.previewCodexSessionId != nil
+    }
+
+    func refresh(force: Bool = false, focusedProvider: ProviderKind? = nil) async {
+        // Never overlap full snapshot loads. Preview/pin actions can
+        // arrive while a refresh is already in flight; queue exactly
+        // one follow-up instead of spawning competing URL/file scans.
+        if self.isRefreshing {
+            if force {
+                self.queuedRefreshAfterCurrent = true
+                if focusedProvider == nil {
+                    self.queuedRefreshNeedsFull = true
+                    self.queuedRefreshProvider = nil
+                } else if !self.queuedRefreshNeedsFull {
+                    self.queuedRefreshProvider = focusedProvider
+                }
+            }
+            return
+        }
         self.isRefreshing = true
-        defer { self.isRefreshing = false }
+        defer {
+            self.isRefreshing = false
+            if self.queuedRefreshAfterCurrent {
+                let queuedProvider = self.queuedRefreshNeedsFull ? nil : self.queuedRefreshProvider
+                self.queuedRefreshAfterCurrent = false
+                self.queuedRefreshNeedsFull = false
+                self.queuedRefreshProvider = nil
+                Task { @MainActor in await self.refresh(force: true, focusedProvider: queuedProvider) }
+            }
+        }
 
         do {
             let recentRate = self.recentDailySpendRate(now: Date())
@@ -829,9 +1078,14 @@ final class MenuBarModel {
             // sessions without committing. Click then commits.
             let targetClaudeSession = self.previewClaudeSessionId
                 ?? self.pinnedClaudeSessionId
+            let targetCodexSession = self.previewCodexSessionId
+                ?? self.pinnedCodexSessionId
             let overview = try await self.source.loadOverview(
                 recentDailySpend: recentRate,
-                pinnedClaudeSessionId: targetClaudeSession)
+                pinnedClaudeSessionId: targetClaudeSession,
+                pinnedCodexSessionId: targetCodexSession,
+                focusedProvider: focusedProvider,
+                existingOverview: self.overview)
             // Latest-wins: if hover moved while we were fetching,
             // discard this result. A newer preview task already
             // fired with the right target — letting this stale
@@ -839,23 +1093,362 @@ final class MenuBarModel {
             // sessions as the queue drains.
             let currentTarget = self.previewClaudeSessionId
                 ?? self.pinnedClaudeSessionId
-            guard targetClaudeSession == currentTarget else { return }
-            self.detectFireEvents(in: overview)
-            self.recordWindowSamples(from: overview, now: Date())
-            self.recordOverageSamples(from: overview, now: Date())
-            self.overview = overview
-            await self.notificationController.evaluate(overview)
-            if overview.snapshot(for: self.selectedProvider) == nil,
-               let first = overview.snapshots.first
-            {
-                self.selectedProvider = first.kind
-            }
-            self.lastError = nil
-            self.lastRefreshAt = Date()
+            let currentCodexTarget = self.previewCodexSessionId
+                ?? self.pinnedCodexSessionId
+            guard targetClaudeSession == currentTarget,
+                  targetCodexSession == currentCodexTarget
+            else { return }
+            await self.applyOverview(
+                overview,
+                recordSamples: true,
+                evaluateNotifications: true,
+                markFullRefresh: true)
         } catch {
             self.lastError = UsageError.from(error)
+            self.onSnapshotChanged?()
         }
+    }
+
+    private func refreshFastInitialOverview() async {
+        let overview = await self.source.loadFastOverview(
+            pinnedClaudeSessionId: self.pinnedClaudeSessionId,
+            pinnedCodexSessionId: self.pinnedCodexSessionId)
+        await self.applyOverview(
+            overview,
+            recordSamples: false,
+            evaluateNotifications: false,
+            markFullRefresh: false)
+    }
+
+    private func refreshFocusedPreview(provider: ProviderKind) async {
+        let targetClaudeSession = self.previewClaudeSessionId
+            ?? self.pinnedClaudeSessionId
+        let targetCodexSession = self.previewCodexSessionId
+            ?? self.pinnedCodexSessionId
+        let baseOverview = self.overview
+        // Use a throwaway source so hover/peek is never queued behind
+        // the long-lived source's full analytics actor work.
+        let source = UsageSnapshotSource()
+
+        do {
+            let overview: UsageOverview
+            if baseOverview.snapshots.isEmpty {
+                overview = await source.loadFastOverview(
+                    pinnedClaudeSessionId: targetClaudeSession,
+                    pinnedCodexSessionId: targetCodexSession)
+            } else {
+                overview = try await source.loadOverview(
+                    pinnedClaudeSessionId: targetClaudeSession,
+                    pinnedCodexSessionId: targetCodexSession,
+                    focusedProvider: provider,
+                    existingOverview: baseOverview)
+            }
+
+            let currentClaudeTarget = self.previewClaudeSessionId
+                ?? self.pinnedClaudeSessionId
+            let currentCodexTarget = self.previewCodexSessionId
+                ?? self.pinnedCodexSessionId
+            guard targetClaudeSession == currentClaudeTarget,
+                  targetCodexSession == currentCodexTarget
+            else { return }
+
+            await self.applyOverview(
+                overview,
+                recordSamples: false,
+                evaluateNotifications: false,
+                markFullRefresh: false)
+        } catch {
+            self.lastError = UsageError.from(error)
+            self.onSnapshotChanged?()
+        }
+    }
+
+    private func applyOverview(
+        _ overview: UsageOverview,
+        recordSamples: Bool,
+        evaluateNotifications: Bool,
+        markFullRefresh: Bool) async
+    {
+        self.detectFireEvents(in: overview)
+        let now = Date()
+        self.recordWindowSamples(from: overview, now: now)
+        if recordSamples {
+            self.recordOverageSamples(from: overview, now: now)
+        }
+        self.overview = overview
+        if evaluateNotifications {
+            await self.notificationController.evaluate(overview)
+        }
+        if overview.snapshot(for: self.selectedProvider) == nil,
+           let first = overview.snapshots.first
+        {
+            self.selectedProvider = first.kind
+        }
+        self.lastError = nil
+        if markFullRefresh {
+            self.lastRefreshAt = Date()
+        } else {
+            self.lastPreviewRefreshAt = Date()
+        }
+        self.updateIdentityWatchTargets(for: overview)
         self.onSnapshotChanged?()
+    }
+
+    private func updateIdentityWatchTargets(for overview: UsageOverview) {
+        let urls = Self.identityWatchURLs(
+            for: overview,
+            selectedProvider: self.selectedProvider,
+            pinnedClaudeSessionId: self.pinnedClaudeSessionId,
+            previewClaudeSessionId: self.previewClaudeSessionId)
+        let provider = self.selectedProvider
+        self.identityFileWatcher.update(urls: urls) { [weak self] in
+            Task { @MainActor in
+                self?.scheduleWatchedIdentityRefresh(provider: provider)
+            }
+        }
+    }
+
+    private func updatePreviewContextWatchTarget(provider: ProviderKind, sessionId: String?) {
+        guard let sessionId else {
+            switch provider {
+            case .codex:
+                if self.previewCodexSessionId == nil {
+                    self.previewContextWatcher.cancelAll()
+                    self.previewContextRefreshTask?.cancel()
+                    self.previewContextRefreshTask = nil
+                }
+            case .claude:
+                if self.previewClaudeSessionId == nil {
+                    self.previewContextWatcher.cancelAll()
+                    self.previewContextRefreshTask?.cancel()
+                    self.previewContextRefreshTask = nil
+                }
+            }
+            return
+        }
+
+        let urls = Self.previewContextWatchURLs(provider: provider, sessionId: sessionId)
+        guard !urls.isEmpty else { return }
+        self.previewContextWatcher.update(urls: urls) { [weak self] in
+            Task { @MainActor in
+                self?.schedulePreviewContextRefresh(provider: provider, sessionId: sessionId)
+            }
+        }
+    }
+
+    private func schedulePreviewContextRefresh(provider: ProviderKind, sessionId: String) {
+        switch provider {
+        case .codex:
+            guard self.previewCodexSessionId == sessionId else { return }
+        case .claude:
+            guard self.previewClaudeSessionId == sessionId else { return }
+        }
+
+        self.previewContextRefreshTask?.cancel()
+        self.previewContextRefreshTask = Task { @MainActor [weak self] in
+            let lastRefreshAt = self?.lastPreviewRefreshAt ?? .distantPast
+            let remainingSpacing = Self.previewContextMinimumSpacing
+                - Date().timeIntervalSince(lastRefreshAt)
+            let spacingDelay = max(0, remainingSpacing)
+            if spacingDelay > 0 {
+                try? await Task.sleep(for: .milliseconds(Int(spacingDelay * 1_000)))
+            }
+            try? await Task.sleep(for: Self.previewContextRefreshDebounce)
+            if Task.isCancelled { return }
+            switch provider {
+            case .codex:
+                guard self?.previewCodexSessionId == sessionId else { return }
+            case .claude:
+                guard self?.previewClaudeSessionId == sessionId else { return }
+            }
+            await self?.refreshFocusedPreview(provider: provider)
+        }
+    }
+
+    private func scheduleWatchedIdentityRefresh(provider: ProviderKind) {
+        // File-system events can arrive in short bursts while Claude
+        // rewrites session metadata or Codex commits a title update.
+        // Coalesce them and then do the normal full refresh exactly once.
+        guard provider == self.selectedProvider else { return }
+        guard !self.isPreviewingSession else { return }
+        self.watchedIdentityRefreshTask?.cancel()
+        self.watchedIdentityRefreshTask = Task { @MainActor [weak self] in
+            let lastRefreshAt = self?.lastRefreshAt ?? .distantPast
+            let remainingSpacing = Self.watchedIdentityMinimumSpacing
+                - Date().timeIntervalSince(lastRefreshAt)
+            let spacingDelay = max(0, remainingSpacing)
+            if spacingDelay > 0 {
+                try? await Task.sleep(for: .milliseconds(Int(spacingDelay * 1_000)))
+            }
+            try? await Task.sleep(for: Self.watchedIdentityRefreshDebounce)
+            if Task.isCancelled { return }
+            await self?.refresh(force: true, focusedProvider: provider)
+        }
+    }
+
+    private static func identityWatchURLs(
+        for overview: UsageOverview,
+        selectedProvider: ProviderKind,
+        pinnedClaudeSessionId: String?,
+        previewClaudeSessionId: String?) -> Set<URL>
+    {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        var urls: Set<URL> = []
+
+        switch selectedProvider {
+        case .codex:
+            let codexDB = home.appendingPathComponent(".codex/state_5.sqlite")
+            if fileManager.fileExists(atPath: codexDB.path) {
+                urls.insert(codexDB)
+            }
+
+            let sessionsRoot = home.appendingPathComponent(".codex/sessions")
+            urls.formUnion(Self.recentJSONLParentURLs(
+                root: sessionsRoot,
+                limit: 6,
+                thresholdSeconds: 1_800))
+        case .claude:
+            let claudeRoot = Self.claudeRoot()
+            let sessionsDir = claudeRoot.appendingPathComponent("sessions")
+            if fileManager.fileExists(atPath: sessionsDir.path) {
+                urls.insert(sessionsDir)
+            }
+
+            var claudeSessionIds: Set<String> = []
+            if let pinnedClaudeSessionId { claudeSessionIds.insert(pinnedClaudeSessionId) }
+            if let previewClaudeSessionId { claudeSessionIds.insert(previewClaudeSessionId) }
+            if let claudeSnapshot = overview.snapshot(for: .claude) {
+                if let id = claudeSnapshot.workContext?.sessionId { claudeSessionIds.insert(id) }
+                if let id = claudeSnapshot.claudeSession?.sessionId { claudeSessionIds.insert(id) }
+                for session in claudeSnapshot.liveSessions {
+                    claudeSessionIds.insert(session.sessionId)
+                }
+            }
+            urls.formUnion(Self.claudeSessionMetadataURLs(
+                sessionIds: claudeSessionIds,
+                root: claudeRoot))
+            urls.formUnion(Self.recentJSONLParentURLs(
+                root: claudeRoot.appendingPathComponent("projects"),
+                limit: 6,
+                thresholdSeconds: 600))
+        }
+
+        return urls
+    }
+
+    private static func recentJSONLParentURLs(
+        root: URL,
+        limit: Int,
+        thresholdSeconds: TimeInterval) -> Set<URL>
+    {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles])
+        else { return [] }
+
+        let cutoff = Date().addingTimeInterval(-thresholdSeconds)
+        var candidates: [(url: URL, modified: Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                ?? .distantPast
+            guard modified >= cutoff else { continue }
+            candidates.append((url, modified))
+        }
+        return Set(candidates
+            .sorted { $0.modified > $1.modified }
+            .prefix(limit)
+            .map { $0.url.deletingLastPathComponent() })
+    }
+
+    private static func previewContextWatchURLs(provider: ProviderKind, sessionId: String) -> Set<URL> {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        var urls: Set<URL> = []
+
+        switch provider {
+        case .codex:
+            let codexDB = home.appendingPathComponent(".codex/state_5.sqlite")
+            if fileManager.fileExists(atPath: codexDB.path) {
+                urls.insert(codexDB)
+            }
+            urls.formUnion(Self.matchingJSONLURLs(
+                sessionId: sessionId,
+                root: home.appendingPathComponent(".codex/sessions"),
+                allowRolloutSuffix: true))
+        case .claude:
+            let claudeRoot = Self.claudeRoot()
+            urls.formUnion(Self.claudeSessionMetadataURLs(
+                sessionIds: [sessionId],
+                root: claudeRoot))
+            urls.formUnion(Self.matchingJSONLURLs(
+                sessionId: sessionId,
+                root: claudeRoot.appendingPathComponent("projects"),
+                allowRolloutSuffix: false))
+        }
+
+        return urls
+    }
+
+    private static func matchingJSONLURLs(
+        sessionId: String,
+        root: URL,
+        allowRolloutSuffix: Bool) -> Set<URL>
+    {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])
+        else { return [] }
+
+        var result: Set<URL> = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let basename = url.deletingPathExtension().lastPathComponent
+            if basename == sessionId || (allowRolloutSuffix && Self.rolloutSessionId(from: url) == sessionId) {
+                result.insert(url)
+            }
+        }
+        return result
+    }
+
+    private static func rolloutSessionId(from url: URL) -> String? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.count >= 36 else { return nil }
+        let suffix = String(name.suffix(36))
+        let pattern = #"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"#
+        guard suffix.range(of: pattern, options: .regularExpression) != nil else {
+            return nil
+        }
+        return suffix
+    }
+
+    private static func claudeSessionMetadataURLs(sessionIds: Set<String>, root: URL) -> Set<URL> {
+        guard !sessionIds.isEmpty else { return [] }
+        let sessionsDir = root.appendingPathComponent("sessions")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: sessionsDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])
+        else { return [] }
+
+        var result: Set<URL> = []
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sessionId = json["sessionId"] as? String,
+                  sessionIds.contains(sessionId)
+            else { continue }
+            result.insert(url)
+        }
+        return result
+    }
+
+    private static func claudeRoot() -> URL {
+        if let override = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
     }
 
     /// Detect per-turn token deltas, feed the rolling-window pattern, and
@@ -1048,17 +1641,20 @@ final class MenuBarModel {
             }
         }
 
-        // Don't surface anything for sub-2% drift unless we have a
-        // meaningful forecast that overruns.
-        if aheadOfPace < 2,
-           !(projected.map { $0 > 100 } ?? false)
+        // Don't surface anything for sub-2% fair-pace drift unless
+        // we have a meaningful recent-rate projection.
+        if abs(aheadOfPace) < 2,
+           projected == nil
         {
             return nil
         }
 
         return WindowForecast(
+            paceDeltaPercent: aheadOfPace,
             aheadOfPacePercent: max(0, aheadOfPace),
+            fairPaceReservePercent: max(0, -aheadOfPace),
             projectedAtResetPercent: projected,
+            projectedReservePercent: projected.map { max(0, 100 - $0) },
             runsOutAt: runsOutAt)
     }
 

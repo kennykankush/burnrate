@@ -6,15 +6,40 @@ import SwiftUI
 
 struct MenuBarRootView: View {
     @Bindable var model: MenuBarModel
+    @State private var panel: MenuBarPanel = .settings
 
     var body: some View {
         // MenuBarExtra(.window) provides the system Liquid Glass chrome for us
         // on macOS 26 — we just supply the content. No glassEffect needed at
         // the root, no manual backdrop. Older macOS gets a custom backdrop.
-        MenuBarContent(model: self.model)
+        Group {
+            switch self.panel {
+            case .settings:
+                MenuBarSettingsContent(
+                    model: self.model,
+                    openArchive: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            self.panel = .archive
+                        }
+                    })
+            case .archive:
+                LegacyMenuBarContent(
+                    model: self.model,
+                    closeArchive: {
+                        withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                            self.panel = .settings
+                        }
+                    })
+            }
+        }
             .frame(width: DesignSystem.Layout.popoverWidth, height: DesignSystem.Layout.popoverHeight)
             .modifier(LegacyBackdropIfNeeded())
     }
+}
+
+private enum MenuBarPanel {
+    case settings
+    case archive
 }
 
 private struct LegacyBackdropIfNeeded: ViewModifier {
@@ -46,12 +71,41 @@ private struct RefreshSpinModifier: ViewModifier {
 }
 
 @MainActor
-private struct MenuBarContent: View {
+private struct MenuBarSettingsContent: View {
     @Bindable var model: MenuBarModel
+    let openArchive: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            HeaderBar(model: self.model)
+            SettingsHeader(model: self.model)
+            Divider().overlay(DesignSystem.Colors.stroke.opacity(0.6))
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 12) {
+                    StatusItemSettings(model: self.model)
+                    NotchSettings(model: self.model)
+                    AlertStartupSettings(model: self.model)
+                    ArchiveSettings(openArchive: self.openArchive)
+                }
+                .padding(.horizontal, DesignSystem.Layout.contentPadding)
+                .padding(.vertical, 14)
+            }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            Divider().overlay(DesignSystem.Colors.stroke.opacity(0.6))
+            StatuslineFooter(model: self.model)
+        }
+    }
+}
+
+@MainActor
+private struct LegacyMenuBarContent: View {
+    @Bindable var model: MenuBarModel
+    let closeArchive: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ArchiveHeader(model: self.model, closeArchive: self.closeArchive)
             TabBar(model: self.model)
             Divider().overlay(DesignSystem.Colors.stroke.opacity(0.6))
 
@@ -75,6 +129,499 @@ struct MenuBarLabel: View {
             Text(self.model.menuBarDisplay.value)
                 .font(.geist(size: 11, weight: .medium))
         }
+    }
+}
+
+// MARK: - Settings surface
+
+@MainActor
+private struct SettingsHeader: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                BrandMark(mark: .icon3D, size: 22)
+                    .shadow(color: Brand.Palette.brandPurple.opacity(0.35), radius: 5, y: 2)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Settings")
+                        .font(.geist(size: 14, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                    Text("burnrate")
+                        .font(.geistMono(size: 9, weight: .medium))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                }
+            }
+
+            Spacer()
+
+            SourceToggle(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
+
+            Button {
+                Task { await self.model.refresh() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+                    .modifier(RefreshSpinModifier(isRefreshing: self.model.isRefreshing))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(DesignSystem.Colors.secondaryText)
+            .frame(width: 26, height: 26)
+            .brandGlass(cornerRadius: 7, interactive: true)
+            .disabled(self.model.isRefreshing)
+            .help("Refresh")
+        }
+        .padding(.horizontal, DesignSystem.Layout.contentPadding)
+        .padding(.vertical, 10)
+    }
+}
+
+@MainActor
+private struct ArchiveHeader: View {
+    @Bindable var model: MenuBarModel
+    let closeArchive: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: self.closeArchive) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(DesignSystem.Colors.secondaryText)
+            .brandGlass(cornerRadius: 7, interactive: true)
+            .help("Back to settings")
+
+            Text("Usage archive")
+                .font(.geist(size: 14, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+
+            Spacer()
+
+            SourceToggle(selectedProvider: self.$model.selectedProvider, snapshots: self.model.overview.snapshots)
+        }
+        .padding(.horizontal, DesignSystem.Layout.contentPadding)
+        .padding(.vertical, 10)
+    }
+}
+
+@MainActor
+private struct StatusItemSettings: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        SettingsSection(title: "Status item") {
+            StatusItemPreview(model: self.model)
+
+            SettingBlock(label: "Display") {
+                HStack(spacing: 6) {
+                    ForEach(MenuBarDisplayMode.allCases) { mode in
+                        SettingsChoiceButton(
+                            title: mode.label,
+                            isSelected: self.model.menuBarDisplayMode == mode,
+                            action: { self.model.setMenuBarDisplayMode(mode) })
+                    }
+                }
+            }
+
+            SettingBlock(label: "Icon") {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+                    ForEach(MenuBarIconStyle.allCases) { style in
+                        SettingsIconButton(
+                            style: style,
+                            provider: self.model.selectedProvider,
+                            isSelected: self.model.menuBarIconStyle == style,
+                            action: { self.model.setMenuBarIconStyle(style) })
+                    }
+                }
+            }
+
+            SettingBlock(label: "Metric") {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
+                    ForEach(MenuBarModule.allCases) { module in
+                        SettingsMetricButton(
+                            module: module,
+                            display: self.model.value(for: module),
+                            isSelected: self.model.selectedMenuBarModule == module,
+                            action: { self.model.setMenuBarModule(module) })
+                    }
+                }
+            }
+        }
+    }
+}
+
+@MainActor
+private struct NotchSettings: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        SettingsSection(title: "Notch") {
+            SettingsToggleRow(
+                title: "Show notch",
+                detail: self.model.notchEnabled ? "enabled" : "hidden",
+                isOn: Binding(
+                    get: { self.model.notchEnabled },
+                    set: { self.model.setNotchEnabled($0) }))
+
+            SettingsToggleRow(
+                title: "Haptics",
+                detail: self.model.hapticsEnabled ? "tap feedback" : "silent",
+                isOn: Binding(
+                    get: { self.model.hapticsEnabled },
+                    set: { self.model.setHapticsEnabled($0) }))
+
+            SettingsMenuRow(
+                title: "Open style",
+                value: self.model.alcoveChoreography.label) {
+                    ForEach(AlcoveChoreography.allCases) { choreography in
+                        Button {
+                            self.model.setAlcoveChoreography(choreography)
+                        } label: {
+                            if self.model.alcoveChoreography == choreography {
+                                Label(choreography.label, systemImage: "checkmark")
+                            } else {
+                                Text(choreography.label)
+                            }
+                        }
+                    }
+                }
+
+            SettingsMenuRow(
+                title: "Spring",
+                value: self.model.alcoveSpring.label) {
+                    ForEach(AlcoveSpring.allCases) { spring in
+                        Button {
+                            self.model.setAlcoveSpring(spring)
+                        } label: {
+                            if self.model.alcoveSpring == spring {
+                                Label(spring.label, systemImage: "checkmark")
+                            } else {
+                                Text(spring.label)
+                            }
+                        }
+                    }
+                }
+
+            HStack(spacing: 8) {
+                SettingsActionButton(
+                    title: self.model.notchCalibrating ? "Done calibrating" : "Calibrate",
+                    systemImage: "slider.horizontal.3",
+                    action: { self.model.setNotchCalibrating(!self.model.notchCalibrating) })
+
+                SettingsActionButton(
+                    title: "Reset size",
+                    systemImage: "arrow.counterclockwise",
+                    action: { self.model.resetNotchSizeOverrides() })
+                    .opacity(self.model.notchWidthOverride == nil && self.model.notchHeightOverride == nil ? 0.45 : 1)
+                    .disabled(self.model.notchWidthOverride == nil && self.model.notchHeightOverride == nil)
+            }
+        }
+    }
+}
+
+@MainActor
+private struct AlertStartupSettings: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        SettingsSection(title: "Alerts and startup") {
+            SettingsMenuRow(title: "Threshold alerts", value: self.model.alertMode.title) {
+                Button("Cycle to \(self.model.alertMode.next.title)") {
+                    self.model.cycleAlertMode()
+                }
+            }
+
+            SettingsToggleRow(
+                title: "Launch at login",
+                detail: self.model.isLaunchAtLoginEnabled ? "enabled" : "off",
+                isOn: Binding(
+                    get: { self.model.isLaunchAtLoginEnabled },
+                    set: { _ in self.model.toggleLaunchAtLogin() }))
+        }
+    }
+}
+
+private struct ArchiveSettings: View {
+    let openArchive: () -> Void
+
+    var body: some View {
+        SettingsSection(title: "Archive") {
+            Button(action: self.openArchive) {
+                HStack(spacing: 10) {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 13, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Open usage archive")
+                            .font(.geist(size: 12, weight: .semibold))
+                            .foregroundStyle(DesignSystem.Colors.primaryText)
+                        Text("Now, map, patterns, wrap, health")
+                            .font(.geistMono(size: 9, weight: .medium))
+                            .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                }
+                .padding(10)
+                .background(DesignSystem.Colors.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(DesignSystem.Colors.stroke.opacity(0.9))
+                }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+@MainActor
+private struct StatusItemPreview: View {
+    @Bindable var model: MenuBarModel
+
+    var body: some View {
+        let display = self.model.menuBarDisplay
+        HStack(spacing: 10) {
+            Image(systemName: self.model.menuBarIconStyle.symbol(for: self.model.selectedProvider))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.accent(for: self.model.selectedProvider))
+                .frame(width: 26, height: 26)
+                .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            if self.model.menuBarDisplayMode != .iconOnly {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(display.value)
+                        .font(.geistMono(size: 15, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                    Text("\(display.label) · \(self.model.menuBarDisplayMode.menuTitle)")
+                        .font(.geistMono(size: 9, weight: .medium))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(self.model.menuBarIconStyle.label)
+                        .font(.geist(size: 12, weight: .semibold))
+                        .foregroundStyle(DesignSystem.Colors.primaryText)
+                    Text(self.model.menuBarDisplayMode.menuTitle)
+                        .font(.geistMono(size: 9, weight: .medium))
+                        .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(10)
+        .background(DesignSystem.Colors.elevatedSurface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(DesignSystem.Colors.stroke.opacity(0.9))
+        }
+    }
+}
+
+private struct SettingsSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(self.title)
+                .font(.geist(size: 11, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.secondaryText)
+            VStack(spacing: 10) {
+                self.content
+            }
+        }
+        .padding(12)
+        .background(DesignSystem.Colors.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(DesignSystem.Colors.stroke.opacity(0.75))
+        }
+    }
+}
+
+private struct SettingBlock<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(self.label)
+                .font(.geistMono(size: 9, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.tertiaryText)
+            self.content
+        }
+    }
+}
+
+private struct SettingsChoiceButton: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: self.action) {
+            Text(self.title)
+                .font(.geist(size: 10, weight: self.isSelected ? .semibold : .medium))
+                .foregroundStyle(self.isSelected ? DesignSystem.Colors.primaryText : DesignSystem.Colors.tertiaryText)
+                .frame(maxWidth: .infinity)
+                .frame(height: 26)
+                .background(self.isSelected ? Color.white.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(self.isSelected ? Color.white.opacity(0.24) : DesignSystem.Colors.stroke.opacity(0.55))
+                }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SettingsIconButton: View {
+    let style: MenuBarIconStyle
+    let provider: ProviderKind
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: self.action) {
+            HStack(spacing: 6) {
+                Image(systemName: self.style.symbol(for: self.provider))
+                    .font(.system(size: 11, weight: .semibold))
+                Text(self.style.label)
+                    .font(.geist(size: 10, weight: self.isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            .foregroundStyle(self.isSelected ? DesignSystem.Colors.primaryText : DesignSystem.Colors.tertiaryText)
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .background(self.isSelected ? Color.white.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(self.isSelected ? Color.white.opacity(0.24) : DesignSystem.Colors.stroke.opacity(0.55))
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SettingsMetricButton: View {
+    let module: MenuBarModule
+    let display: MenuBarDisplay?
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: self.action) {
+            VStack(spacing: 2) {
+                Text(self.module.label)
+                    .font(.geistMono(size: 8, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+                Text(self.display?.value ?? "--")
+                    .font(.geistMono(size: 11, weight: .semibold))
+                    .foregroundStyle(self.isSelected ? DesignSystem.Colors.primaryText : DesignSystem.Colors.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 34)
+            .background(self.isSelected ? Color.white.opacity(0.16) : Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(self.isSelected ? Color.white.opacity(0.24) : DesignSystem.Colors.stroke.opacity(0.55))
+            }
+        }
+        .buttonStyle(.plain)
+        .help(self.module.displayName)
+    }
+}
+
+private struct SettingsToggleRow: View {
+    let title: String
+    let detail: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(self.title)
+                    .font(.geist(size: 11, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.primaryText)
+                Text(self.detail)
+                    .font(.geistMono(size: 9, weight: .medium))
+                    .foregroundStyle(DesignSystem.Colors.tertiaryText)
+            }
+            Spacer()
+            Toggle("", isOn: self.$isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct SettingsMenuRow<Content: View>: View {
+    let title: String
+    let value: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(self.title)
+                .font(.geist(size: 11, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.primaryText)
+            Spacer()
+            Menu {
+                self.content
+            } label: {
+                HStack(spacing: 6) {
+                    Text(self.value)
+                        .font(.geistMono(size: 10, weight: .semibold))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .foregroundStyle(DesignSystem.Colors.secondaryText)
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct SettingsActionButton: View {
+    let title: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: self.action) {
+            HStack(spacing: 6) {
+                Image(systemName: self.systemImage)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(self.title)
+                    .font(.geist(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(DesignSystem.Colors.secondaryText)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(Color.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(DesignSystem.Colors.stroke.opacity(0.7))
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 

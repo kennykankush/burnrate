@@ -4,6 +4,8 @@ import os.log
 private let log = Logger(subsystem: "fyi.burnrate.app", category: "claudeWatcher")
 
 public actor ClaudeUsageWatcher {
+    private var slashCommandCountsCache: (signature: FileSignature, counts: [String: Int])?
+
     public init() {}
 
     public func loadSnapshot(
@@ -14,6 +16,9 @@ public actor ClaudeUsageWatcher {
         let root = Self.claudeRoot()
         guard FileManager.default.fileExists(atPath: root.path) else { return nil }
 
+        let oauthTask = Task.detached(priority: .utility) {
+            await Self.readOAuthUsage(root: root)
+        }
         let baseAggregate = self.readAggregate(root: root)
         let sessionMetas = self.readSessionMetas(root: root)
         let facets = self.readLatestFacets(root: root, metas: sessionMetas)
@@ -22,9 +27,9 @@ public actor ClaudeUsageWatcher {
             facets: facets,
             now: now,
             pinnedSessionId: pinnedSessionId)
-        let oauth = await self.readOAuthUsage(root: root)
         let leaderboard = self.scanRecentJsonlsForTools(root: root, limit: 20)
         let betaGates = self.readBetaGates(root: root)
+        let oauth = await oauthTask.value
         let todayBreakdown = self.buildTodayBreakdown(
             sessionMetas: sessionMetas,
             liveSession: liveSession,
@@ -96,6 +101,53 @@ public actor ClaudeUsageWatcher {
             updatedAt: now)
     }
 
+    public func loadPreviewSnapshot(
+        now: Date,
+        pinnedSessionId: String?,
+        preserving base: ProviderUsageSnapshot?) async -> ProviderUsageSnapshot?
+    {
+        let root = Self.claudeRoot()
+        guard FileManager.default.fileExists(atPath: root.path) else { return base }
+
+        let liveSession = self.readLiveSession(
+            root: root,
+            facets: base?.claudeFacets,
+            now: now,
+            pinnedSessionId: pinnedSessionId)
+        guard let liveSession else { return base }
+
+        let liveSessions = self.readLiveSessions(root: root, now: now)
+        let workContext = Self.workContext(from: liveSession, now: now)
+        let modelMix = (base?.modelMix.isEmpty == false)
+            ? (base?.modelMix ?? [])
+            : self.modelMixFromLive(liveSession)
+
+        return ProviderUsageSnapshot(
+            kind: .claude,
+            planName: base?.planName,
+            accountLabel: base?.accountLabel,
+            projectLabel: liveSession.projectName ?? base?.projectLabel ?? "Claude Code",
+            windows: base?.windows ?? [],
+            today: base?.today ?? .empty,
+            modelMix: modelMix,
+            workContext: workContext,
+            codexSession: nil,
+            codexMemory: nil,
+            codexSurface: nil,
+            claudeSession: liveSession,
+            claudeAggregate: base?.claudeAggregate,
+            claudeFacets: base?.claudeFacets,
+            claudeTodayBreakdown: base?.claudeTodayBreakdown,
+            claudeMemory: base?.claudeMemory,
+            patternCards: base?.patternCards ?? [],
+            healthIndicators: base?.healthIndicators ?? [],
+            creditBalance: base?.creditBalance,
+            extraSpend: base?.extraSpend,
+            streakDays: base?.streakDays ?? 0,
+            liveSessions: liveSessions.isEmpty ? (base?.liveSessions ?? []) : liveSessions,
+            updatedAt: now)
+    }
+
     private func computeClaudeProjectMemory(
         sessionMetas: [ParsedSessionMeta],
         liveSession: ClaudeSessionStats?,
@@ -133,7 +185,7 @@ public actor ClaudeUsageWatcher {
             lastUpdatedAt: lastUpdatedAt)
     }
 
-    private func readOAuthUsage(root: URL) async -> ClaudeOAuthUsage? {
+    private static func readOAuthUsage(root: URL) async -> ClaudeOAuthUsage? {
         guard let creds = ClaudeOAuthCredentialReader.read(claudeRoot: root) else { return nil }
         if let usage = await ClaudeOAuthUsageFetcher().fetch(credentials: creds) {
             return usage
@@ -383,7 +435,7 @@ public actor ClaudeUsageWatcher {
         var live: [LiveSession] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             guard let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate),
-                  mtime >= cutoff
+                  mtime >= cutoff || metadata.liveSessionIds.contains(url.deletingPathExtension().lastPathComponent)
             else { continue }
             let sessionId = url.deletingPathExtension().lastPathComponent
             // If we have a session file for this id, trust it: only
@@ -465,6 +517,31 @@ public actor ClaudeUsageWatcher {
     /// won't EPERM, so the simple check is enough here.
     private static func isProcessAlive(pid: Int) -> Bool {
         kill(Int32(pid), 0) == 0
+    }
+
+    private static func fileSignature(for url: URL) -> FileSignature? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]) else {
+            return nil
+        }
+        return FileSignature(
+            fileSize: values.fileSize ?? 0,
+            modifiedAt: values.contentModificationDate)
+    }
+
+    private static func boundedText(from url: URL, maxBytes: Int) -> String? {
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        guard fileSize > maxBytes else {
+            return try? String(contentsOf: url, encoding: .utf8)
+        }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: UInt64(max(0, fileSize - maxBytes)))
+        } catch {
+            return nil
+        }
+        let data = (try? handle.readToEnd()) ?? Data()
+        return String(data: data, encoding: .utf8)
     }
 
     /// Reads a session jsonl and returns the first meaningful user
@@ -870,12 +947,16 @@ public actor ClaudeUsageWatcher {
         let threadTitle = facets?.briefSummary
             ?? facets?.underlyingGoal
             ?? firstUserPrompt.map { Self.truncate($0, to: 60) }
+        let displayName = sessionId.flatMap { id in
+            Self.sessionMetadata(root: root).names[id]
+        } ?? Self.cleanFirstMessage(firstUserPrompt)
 
         return ClaudeSessionStats(
             advisor: advisor,
             sessionId: sessionId,
             projectPath: cwd,
             projectName: projectName,
+            displayName: displayName,
             threadTitle: threadTitle,
             firstPrompt: firstUserPrompt.map { Self.truncate($0, to: 80) },
             gitBranch: gitBranch,
@@ -1958,20 +2039,7 @@ public actor ClaudeUsageWatcher {
     }
 
     private func anxietyMeterCard() -> ClaudePatternCard? {
-        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/history.jsonl")
-        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-
-        var slashCounts: [String: Int] = [:]
-        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let data = line.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let display = object["display"] as? String,
-                  display.hasPrefix("/")
-            else { continue }
-            // First word only (e.g., "/context", not "/context something")
-            let first = display.split(separator: " ", maxSplits: 1).first.map(String.init) ?? display
-            slashCounts[first, default: 0] += 1
-        }
+        let slashCounts = self.slashCommandCounts()
         guard !slashCounts.isEmpty else { return nil }
 
         let sorted = slashCounts.sorted { $0.value > $1.value }
@@ -2248,7 +2316,7 @@ public actor ClaudeUsageWatcher {
             .prefix(60)
 
         for url in recent {
-            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            guard let content = Self.boundedText(from: url, maxBytes: 1_500_000) else { continue }
             for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
                 guard let data = line.data(using: .utf8),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -2314,7 +2382,7 @@ public actor ClaudeUsageWatcher {
         var bestOutput = 0
 
         for url in recent {
-            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            guard let content = Self.boundedText(from: url, maxBytes: 1_500_000) else { continue }
             for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
                 guard let data = line.data(using: .utf8),
                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -2418,6 +2486,12 @@ public actor ClaudeUsageWatcher {
 
     private func slashCommandCounts() -> [String: Int] {
         let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/history.jsonl")
+        guard let signature = Self.fileSignature(for: url) else { return [:] }
+        if let cached = self.slashCommandCountsCache,
+           cached.signature == signature
+        {
+            return cached.counts
+        }
         guard let content = try? String(contentsOf: url, encoding: .utf8) else { return [:] }
         var counts: [String: Int] = [:]
         for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -2429,6 +2503,7 @@ public actor ClaudeUsageWatcher {
             let first = display.split(separator: " ", maxSplits: 1).first.map(String.init) ?? display
             counts[first, default: 0] += 1
         }
+        self.slashCommandCountsCache = (signature: signature, counts: counts)
         return counts
     }
 
@@ -3169,7 +3244,21 @@ public enum ClaudePricing {
     public static func rates(for model: String) -> Rates {
         let m = model.lowercased()
         if m.contains("opus") {
+            // Current Opus family pricing. Opus 4.5+ uses the lower
+            // $5/$25 API price; Opus 4 and 4.1 remain at legacy $15/$75.
+            if m.contains("4-5") || m.contains("4.5")
+                || m.contains("4-6") || m.contains("4.6")
+                || m.contains("4-7") || m.contains("4.7")
+            {
+                return Rates(input: 5.0, output: 25.0, cacheRead: 0.50, cacheCreate: 6.25)
+            }
+            if m.trimmingCharacters(in: .whitespacesAndNewlines) == "opus" {
+                return Rates(input: 5.0, output: 25.0, cacheRead: 0.50, cacheCreate: 6.25)
+            }
             return Rates(input: 15.0, output: 75.0, cacheRead: 1.50, cacheCreate: 18.75)
+        }
+        if m.contains("haiku-4-5") || m.contains("haiku 4.5") {
+            return Rates(input: 1.0, output: 5.0, cacheRead: 0.10, cacheCreate: 1.25)
         }
         if m.contains("haiku") {
             return Rates(input: 0.80, output: 4.0, cacheRead: 0.08, cacheCreate: 1.0)
@@ -3286,6 +3375,11 @@ private struct SessionMetaRaw: Decodable {
         case messageHours = "message_hours"
         case userMessageTimestamps = "user_message_timestamps"
     }
+}
+
+private struct FileSignature: Equatable {
+    let fileSize: Int
+    let modifiedAt: Date?
 }
 
 struct ParsedSessionMeta {

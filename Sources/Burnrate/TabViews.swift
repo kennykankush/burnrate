@@ -400,14 +400,34 @@ private struct ForecastLine: View {
         (self.forecast.projectedAtResetPercent ?? 0) > 100
     }
 
+    private var primaryText: String {
+        if self.forecast.aheadOfPacePercent >= 2 {
+            return "\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of pace"
+        }
+        if self.forecast.fairPaceReservePercent >= 2 {
+            return "\(Int(self.forecast.fairPaceReservePercent.rounded()))% in reserve"
+        }
+        return "on fair pace"
+    }
+
+    private var primaryTone: Color {
+        if self.trendsOver || self.forecast.aheadOfPacePercent >= 2 {
+            return DesignSystem.Colors.danger
+        }
+        if self.forecast.fairPaceReservePercent >= 2 {
+            return DesignSystem.Colors.success
+        }
+        return DesignSystem.Colors.warning
+    }
+
     var body: some View {
         HStack(spacing: 5) {
             Spacer().frame(width: 84)
 
             // Snapshot reading — always shown when forecast surfaces.
-            Text("\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of pace")
+            Text(self.primaryText)
                 .font(.geist(size: 9, weight: .semibold))
-                .foregroundStyle(self.trendsOver ? DesignSystem.Colors.danger : DesignSystem.Colors.warning)
+                .foregroundStyle(self.primaryTone)
 
             // Forecast clause — only when we have meaningful new info to add.
             if let projected = self.forecast.projectedAtResetPercent,
@@ -421,6 +441,16 @@ private struct ForecastLine: View {
                     Text("runs out in \(DisplayText.runsOut(runsOut))")
                         .font(.geist(size: 9))
                         .foregroundStyle(DesignSystem.Colors.danger)
+                } else if let over = self.forecast.projectedOverPercent {
+                    Text("\(over)% over if pace holds")
+                        .font(.geist(size: 9))
+                        .foregroundStyle(DesignSystem.Colors.danger)
+                } else if let reserve = self.forecast.projectedReservePercent,
+                          reserve >= 1
+                {
+                    Text("\(Int(reserve.rounded()))% reserve if pace holds")
+                        .font(.geist(size: 9))
+                        .foregroundStyle(DesignSystem.Colors.success)
                 } else {
                     Text("trending to \(Int(projected.rounded()))% by reset")
                         .font(.geist(size: 9))

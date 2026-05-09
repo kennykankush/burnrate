@@ -8,6 +8,10 @@ struct BurnrateApp {
             await InspectClaude.run()
             exit(0)
         }
+        if CommandLine.arguments.contains("--inspect-overview") {
+            await InspectOverview.run()
+            exit(0)
+        }
         BurnrateAppScene.main()
     }
 }
@@ -57,6 +61,83 @@ final class BurnrateAppDelegate: NSObject, NSApplicationDelegate, ObservableObje
     }
 }
 
+enum InspectOverview {
+    static func run() async {
+        let source = UsageSnapshotSource()
+        do {
+            let codexPin = Self.value(for: "--pin-codex=")
+            let claudePin = Self.value(for: "--pin-claude=")
+            if CommandLine.arguments.contains("--fast-overview") {
+                let fastStartedAt = Date()
+                let overview = await source.loadFastOverview(
+                    pinnedClaudeSessionId: claudePin,
+                    pinnedCodexSessionId: codexPin)
+                let fastMs = Int(Date().timeIntervalSince(fastStartedAt) * 1_000)
+                print("=== Fast usage overview ===")
+                print("fastLoadMs: \(fastMs)")
+                print("snapshots: \(overview.snapshots.map { $0.kind.rawValue }.joined(separator: ", "))")
+                for snapshot in overview.snapshots {
+                    print("[\(snapshot.kind.rawValue)] context: \(snapshot.workContext?.sessionId ?? "—") liveSessions: \(snapshot.liveSessions.count)")
+                }
+                return
+            }
+            let loadStartedAt = Date()
+            let overview = try await source.loadOverview(
+                pinnedClaudeSessionId: claudePin,
+                pinnedCodexSessionId: codexPin)
+            let loadMs = Int(Date().timeIntervalSince(loadStartedAt) * 1_000)
+            print("=== Usage overview ===")
+            if let codexPin { print("pinCodex: \(codexPin)") }
+            if let claudePin { print("pinClaude: \(claudePin)") }
+            print("loadMs: \(loadMs)")
+            if CommandLine.arguments.contains("--focused-preview"),
+               let provider = Self.focusedProvider(codexPin: codexPin, claudePin: claudePin)
+            {
+                let previewStartedAt = Date()
+                let preview = try await source.loadOverview(
+                    pinnedClaudeSessionId: claudePin,
+                    pinnedCodexSessionId: codexPin,
+                    focusedProvider: provider,
+                    existingOverview: overview)
+                let previewMs = Int(Date().timeIntervalSince(previewStartedAt) * 1_000)
+                let context = preview.snapshot(for: provider)?.workContext?.sessionId ?? "—"
+                print("focusedPreviewMs: \(previewMs)")
+                print("focusedContext: \(context)")
+            }
+            print("snapshots: \(overview.snapshots.map { $0.kind.rawValue }.joined(separator: ", "))")
+            for snapshot in overview.snapshots {
+                print("[\(snapshot.kind.rawValue)]")
+                print("  project: \(snapshot.projectLabel ?? "—")")
+                print("  context: \(snapshot.workContext?.sessionId ?? "—")")
+                print("  windows:")
+                for window in snapshot.windows {
+                    let reset = window.resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "—"
+                    print("    - \(window.title): \(Int(window.usedPercent.rounded()))% resets=\(reset)")
+                }
+                print("  liveSessions: \(snapshot.liveSessions.count)")
+                for session in snapshot.liveSessions.prefix(6) {
+                    print("    - \(session.sessionId) · \(session.displayName ?? session.projectName) · \(session.projectName)")
+                }
+            }
+        } catch {
+            print("inspect-overview failed: \(error.localizedDescription)")
+        }
+    }
+
+    private static func value(for prefix: String) -> String? {
+        CommandLine.arguments
+            .first { $0.hasPrefix(prefix) }
+            .map { String($0.dropFirst(prefix.count)) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private static func focusedProvider(codexPin: String?, claudePin: String?) -> ProviderKind? {
+        if codexPin != nil { return .codex }
+        if claudePin != nil { return .claude }
+        return nil
+    }
+}
+
 enum InspectClaude {
     static func run() async {
         let watcher = ClaudeUsageWatcher()
@@ -87,6 +168,7 @@ enum InspectClaude {
             print("liveSession:")
             print("  sessionId:    \(live.sessionId ?? "—")")
             print("  project:      \(live.projectName ?? "—") (\(live.projectPath ?? "—"))")
+            print("  displayName:  \(live.displayName ?? "—")")
             print("  threadTitle:  \(live.threadTitle ?? "—")")
             print("  branch:       \(live.gitBranch ?? "—")")
             print("  model:        \(live.modelName ?? "—") (cli \(live.cliVersion ?? "—"))")

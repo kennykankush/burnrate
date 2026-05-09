@@ -953,6 +953,7 @@ public struct ClaudeSessionStats: Codable, Equatable, Sendable {
     public let sessionId: String?
     public let projectPath: String?
     public let projectName: String?
+    public let displayName: String?
     public let threadTitle: String?
     public let firstPrompt: String?
     public let gitBranch: String?
@@ -1009,6 +1010,7 @@ public struct ClaudeSessionStats: Codable, Equatable, Sendable {
         sessionId: String?,
         projectPath: String?,
         projectName: String?,
+        displayName: String? = nil,
         threadTitle: String?,
         firstPrompt: String?,
         gitBranch: String?,
@@ -1045,6 +1047,7 @@ public struct ClaudeSessionStats: Codable, Equatable, Sendable {
         self.sessionId = sessionId
         self.projectPath = projectPath
         self.projectName = projectName
+        self.displayName = displayName
         self.threadTitle = threadTitle
         self.firstPrompt = firstPrompt
         self.gitBranch = gitBranch

@@ -26,16 +26,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            // Capture both left- and right-clicks. Left opens the popover,
-            // right pops the module-picker menu — Stats does this exact
-            // pattern, and it's what users instinctively reach for.
+            // Capture both left- and right-clicks. Left opens the
+            // configuration popover; right gives a quick appearance menu.
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
             button.action = #selector(self.handleClick(_:))
             button.target = self
 
-            // Replace the default NSButton image+title with a Stats-style
-            // two-line stack: tiny label up top, monospace value below.
-            // The button still owns the click area; we just paint inside.
+            // Replace the default NSButton image+title with a custom anchor
+            // that can render icon-only, icon+metric, or the legacy two-line
+            // metric stack. The button still owns the click area; we just
+            // paint inside.
             let stack = MenuBarStackView()
             stack.translatesAutoresizingMaskIntoConstraints = false
             button.addSubview(stack)
@@ -106,9 +106,8 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// Build the module-picker NSMenu and pop it under the status item.
-    /// Reused by the gear-icon submenu in the popover for users who don't
-    /// know to right-click.
+    /// Build the quick appearance NSMenu and pop it under the status item.
+    /// The full configuration surface lives in the left-click popover.
     private func presentModulePicker(_ sender: NSStatusBarButton) {
         guard let item = self.statusItem else { return }
         let menu = self.buildModulePickerMenu()
@@ -123,6 +122,39 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     func buildModulePickerMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.addItem(Self.headerItem("Status item"))
+
+        let modeItem = NSMenuItem(title: "Display mode", action: nil, keyEquivalent: "")
+        let modeMenu = NSMenu()
+        for mode in MenuBarDisplayMode.allCases {
+            let entry = NSMenuItem(
+                title: mode.menuTitle,
+                action: #selector(self.handleDisplayModeSelection(_:)),
+                keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = mode.rawValue
+            entry.state = (self.model.menuBarDisplayMode == mode) ? .on : .off
+            modeMenu.addItem(entry)
+        }
+        menu.setSubmenu(modeMenu, for: modeItem)
+        menu.addItem(modeItem)
+
+        let iconItem = NSMenuItem(title: "Icon style", action: nil, keyEquivalent: "")
+        let iconMenu = NSMenu()
+        for style in MenuBarIconStyle.allCases {
+            let entry = NSMenuItem(
+                title: style.label,
+                action: #selector(self.handleIconStyleSelection(_:)),
+                keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = style.rawValue
+            entry.state = (self.model.menuBarIconStyle == style) ? .on : .off
+            iconMenu.addItem(entry)
+        }
+        menu.setSubmenu(iconMenu, for: iconItem)
+        menu.addItem(iconItem)
+
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(Self.headerItem("Menu bar shows"))
         for module in MenuBarModule.allCases {
             let entry = NSMenuItem(
@@ -157,12 +189,37 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         self.refreshLabel()
     }
 
+    @objc private func handleDisplayModeSelection(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = MenuBarDisplayMode(rawValue: raw)
+        else { return }
+        self.model.setMenuBarDisplayMode(mode)
+        self.refreshLabel()
+    }
+
+    @objc private func handleIconStyleSelection(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let style = MenuBarIconStyle(rawValue: raw)
+        else { return }
+        self.model.setMenuBarIconStyle(style)
+        self.refreshLabel()
+    }
+
     func refreshLabel() {
         guard let stack = self.stackView else { return }
         let display = self.model.menuBarDisplay
-        stack.update(label: display.label, value: display.value)
+        let iconSymbol = self.model.menuBarIconStyle.symbol(for: self.model.selectedProvider)
+        let accent = NSColor(self.model.selectedProvider == .codex
+            ? DesignSystem.Colors.accent(for: .codex)
+            : DesignSystem.Colors.brandHot)
+        stack.update(
+            label: display.label,
+            value: display.value,
+            iconSymbol: iconSymbol,
+            iconTint: accent,
+            mode: self.model.menuBarDisplayMode)
         let targetWidth = ceil(stack.intrinsicContentSize.width) + 14
-        self.statusItem?.length = max(34, targetWidth)
+        self.statusItem?.length = max(self.model.menuBarDisplayMode == .iconOnly ? 28 : 34, targetWidth)
     }
 
     nonisolated func popoverDidClose(_ notification: Notification) {
@@ -176,10 +233,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 /// larger monospace value below. Centered, fixed metrics so the menu-bar
 /// item width changes only when the value's character count changes.
 final class MenuBarStackView: NSView {
+    private let rootStack: NSStackView
+    private let textStack: NSStackView
+    private let iconView: NSImageView
     private let labelField: NSTextField
     private let valueField: NSTextField
 
     override init(frame: NSRect) {
+        self.rootStack = NSStackView()
+        self.textStack = NSStackView()
+        self.iconView = NSImageView()
         self.labelField = Self.makeLabelField()
         self.valueField = Self.makeValueField()
         super.init(frame: frame)
@@ -187,6 +250,9 @@ final class MenuBarStackView: NSView {
     }
 
     required init?(coder: NSCoder) {
+        self.rootStack = NSStackView()
+        self.textStack = NSStackView()
+        self.iconView = NSImageView()
         self.labelField = Self.makeLabelField()
         self.valueField = Self.makeValueField()
         super.init(coder: coder)
@@ -194,34 +260,78 @@ final class MenuBarStackView: NSView {
     }
 
     private func commonInit() {
-        self.labelField.translatesAutoresizingMaskIntoConstraints = false
-        self.valueField.translatesAutoresizingMaskIntoConstraints = false
-        self.addSubview(self.labelField)
-        self.addSubview(self.valueField)
+        self.rootStack.orientation = .horizontal
+        self.rootStack.alignment = .centerY
+        self.rootStack.spacing = 4
+        self.rootStack.distribution = .gravityAreas
+        self.rootStack.translatesAutoresizingMaskIntoConstraints = false
 
-        // Two-line stack with a 1pt gap. The label sits in the top half,
-        // value in the bottom half — slightly larger font to stay
-        // readable at the menu bar's ~22pt total height.
+        self.textStack.orientation = .vertical
+        self.textStack.alignment = .centerX
+        self.textStack.spacing = -1
+        self.textStack.distribution = .gravityAreas
+
+        self.iconView.symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: 12,
+            weight: .semibold)
+        self.iconView.contentTintColor = NSColor.labelColor
+        self.iconView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        self.iconView.setContentHuggingPriority(.required, for: .horizontal)
+
+        self.textStack.addArrangedSubview(self.labelField)
+        self.textStack.addArrangedSubview(self.valueField)
+        self.rootStack.addArrangedSubview(self.iconView)
+        self.rootStack.addArrangedSubview(self.textStack)
+        self.addSubview(self.rootStack)
+
         NSLayoutConstraint.activate([
-            self.labelField.centerXAnchor.constraint(equalTo: self.centerXAnchor),
-            self.labelField.topAnchor.constraint(equalTo: self.topAnchor, constant: 1),
-
-            self.valueField.centerXAnchor.constraint(equalTo: self.centerXAnchor),
-            self.valueField.topAnchor.constraint(equalTo: self.labelField.bottomAnchor, constant: -1),
-            self.valueField.bottomAnchor.constraint(lessThanOrEqualTo: self.bottomAnchor, constant: -1),
+            self.rootStack.centerXAnchor.constraint(equalTo: self.centerXAnchor),
+            self.rootStack.centerYAnchor.constraint(equalTo: self.centerYAnchor),
+            self.rootStack.leadingAnchor.constraint(greaterThanOrEqualTo: self.leadingAnchor),
+            self.rootStack.trailingAnchor.constraint(lessThanOrEqualTo: self.trailingAnchor),
+            self.rootStack.topAnchor.constraint(greaterThanOrEqualTo: self.topAnchor),
+            self.rootStack.bottomAnchor.constraint(lessThanOrEqualTo: self.bottomAnchor),
         ])
     }
 
-    func update(label: String, value: String) {
+    func update(
+        label: String,
+        value: String,
+        iconSymbol: String,
+        iconTint: NSColor,
+        mode: MenuBarDisplayMode
+    ) {
+        self.iconView.image = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: nil)
+        self.iconView.contentTintColor = iconTint
         self.labelField.stringValue = label
         self.valueField.stringValue = value
+        switch mode {
+        case .iconOnly:
+            self.iconView.isHidden = false
+            self.textStack.isHidden = true
+            self.labelField.isHidden = true
+            self.valueField.isHidden = true
+            self.rootStack.spacing = 0
+        case .iconAndMetric:
+            self.iconView.isHidden = false
+            self.textStack.isHidden = false
+            self.labelField.isHidden = true
+            self.valueField.isHidden = false
+            self.rootStack.spacing = 4
+        case .metricStack:
+            self.iconView.isHidden = true
+            self.textStack.isHidden = false
+            self.labelField.isHidden = false
+            self.valueField.isHidden = false
+            self.rootStack.spacing = 0
+        }
+        self.needsLayout = true
         self.invalidateIntrinsicContentSize()
     }
 
     override var intrinsicContentSize: NSSize {
-        let labelWidth = self.labelField.intrinsicContentSize.width
-        let valueWidth = self.valueField.intrinsicContentSize.width
-        let width = ceil(max(labelWidth, valueWidth))
+        self.layoutSubtreeIfNeeded()
+        let width = ceil(self.rootStack.fittingSize.width)
         return NSSize(width: width, height: NSView.noIntrinsicMetric)
     }
 
