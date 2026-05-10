@@ -839,9 +839,13 @@ private struct CodexSessionWatcher {
 
     private static func mergeRateLimits(_ limits: [LocalRateLimit]) -> LocalRateLimit? {
         guard !limits.isEmpty else { return nil }
-        let allWindows = limits.flatMap(\.windows)
-        let primary = Self.mostConstrainedWindow(
-            in: allWindows,
+        // Codex writes each `rate_limits` object as a current snapshot.
+        // Earlier snapshots in the same long session can be near depletion;
+        // reusing that high-water mark after a window moves on creates false
+        // hot-cap warnings in the notch.
+        let currentWindows = limits.last?.windows ?? []
+        let primary = Self.currentWindow(
+            in: currentWindows,
             id: "codex-local-primary",
             title: "5h",
             matching: { window in
@@ -850,8 +854,8 @@ private struct CodexSessionWatcher {
                     && !title.contains("week")
                     && !title.contains("7d")
             })
-        let weekly = Self.mostConstrainedWindow(
-            in: allWindows,
+        let weekly = Self.currentWindow(
+            in: currentWindows,
             id: "codex-local-weekly",
             title: "Weekly",
             matching: { window in
@@ -870,21 +874,13 @@ private struct CodexSessionWatcher {
             creditBalance: creditBalance)
     }
 
-    private static func mostConstrainedWindow(
+    private static func currentWindow(
         in windows: [UsageWindow],
         id: String,
         title: String,
         matching predicate: (UsageWindow) -> Bool) -> UsageWindow?
     {
-        let candidates = windows.filter(predicate)
-        guard let strongest = candidates.max(by: { lhs, rhs in
-            if lhs.usedPercent == rhs.usedPercent {
-                let lhsReset = lhs.resetsAt ?? .distantFuture
-                let rhsReset = rhs.resetsAt ?? .distantFuture
-                return lhsReset > rhsReset
-            }
-            return lhs.usedPercent < rhs.usedPercent
-        }) else { return nil }
+        guard let strongest = windows.first(where: predicate) else { return nil }
         return UsageWindow(
             id: id,
             title: title,
