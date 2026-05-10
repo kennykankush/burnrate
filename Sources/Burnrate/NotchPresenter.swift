@@ -849,13 +849,16 @@ final class NotchDisplayState {
 
     private func computeThresholdAlert(now: Date = Date()) -> NotchThresholdAlert? {
         if let title = self.depletedTitle {
-            let back = self.depletedCountdown.map { "back in \($0)" }
-                ?? self.depletedClock
-                ?? "reset pending"
+            let back: String
+            if let countdown = self.depletedCountdown {
+                back = countdown == "now" ? "reset now" : "reset in \(countdown)"
+            } else {
+                back = self.depletedClock ?? "reset pending"
+            }
             return NotchThresholdAlert(
                 id: "depleted-\(title)",
-                title: "BURST DEPLETED",
-                detail: back,
+                title: "CAP DEPLETED NOW",
+                detail: "\(title) · \(back)",
                 symbol: "lock.fill",
                 tone: .tight)
         }
@@ -867,10 +870,11 @@ final class NotchDisplayState {
             let minutes = max(1, Int(ceil(runsOutAt.timeIntervalSince(now) / 60)))
             if minutes <= 15 {
                 let bucket = minutes <= 5 ? 5 : (minutes <= 10 ? 10 : 15)
+                let current = self.fiveHour.map(Self.currentCapDetail) ?? "current 5h usage unavailable"
                 return NotchThresholdAlert(
                     id: "burst-runout-\(bucket)",
-                    title: "BURST IN \(minutes)m",
-                    detail: "Slow down; 5h cap is projected to hit.",
+                    title: "5H PROJECTED FULL",
+                    detail: "\(current) · projected full in \(minutes)m",
                     symbol: "flame.fill",
                     tone: minutes <= 5 ? .tight : .watch)
             }
@@ -880,10 +884,12 @@ final class NotchDisplayState {
            let over = forecast.projectedOverPercent,
            over >= 10
         {
+            let projected = Int((forecast.projectedAtResetPercent ?? Double(100 + over)).rounded())
+            let current = self.fiveHour.map(Self.currentCapDetail) ?? "current 5h usage unavailable"
             return NotchThresholdAlert(
                 id: "burst-projected-over-\(over / 5 * 5)",
-                title: "5H PACE OVER",
-                detail: "\(over)% over by reset if pace holds.",
+                title: "5H PROJECTED OVER",
+                detail: "\(current) · projected \(projected)% by reset",
                 symbol: "bolt.trianglebadge.exclamationmark.fill",
                 tone: over >= 20 ? .tight : .watch)
         }
@@ -892,10 +898,12 @@ final class NotchDisplayState {
            let over = forecast.projectedOverPercent,
            over >= 10
         {
+            let projected = Int((forecast.projectedAtResetPercent ?? Double(100 + over)).rounded())
+            let current = self.weekly.map(Self.currentCapDetail) ?? "current weekly usage unavailable"
             return NotchThresholdAlert(
                 id: "weekly-projected-over-\(over / 5 * 5)",
-                title: "WEEKLY PACE OVER",
-                detail: "\(over)% over by reset if pace holds.",
+                title: "7D PROJECTED OVER",
+                detail: "\(current) · projected \(projected)% by reset",
                 symbol: "calendar.badge.exclamationmark",
                 tone: over >= 20 ? .tight : .watch)
         }
@@ -904,16 +912,16 @@ final class NotchDisplayState {
             if fiveHour.percent >= 95 {
                 return NotchThresholdAlert(
                     id: "burst-used-95",
-                    title: "BURST HOT",
-                    detail: "\(Int(fiveHour.percent.rounded()))% used · \(fiveHour.resetText) left",
+                    title: "5H NOW \(Int(fiveHour.percent.rounded()))% USED",
+                    detail: Self.currentCapDetail(fiveHour),
                     symbol: "bolt.trianglebadge.exclamationmark.fill",
                     tone: .tight)
             }
             if fiveHour.percent >= 85 {
                 return NotchThresholdAlert(
                     id: "burst-used-85",
-                    title: "BURST CLIMBING",
-                    detail: "\(Int(fiveHour.percent.rounded()))% used · pace the next turns",
+                    title: "5H NOW \(Int(fiveHour.percent.rounded()))% USED",
+                    detail: "\(Self.currentCapDetail(fiveHour)) · pace next turns",
                     symbol: "speedometer",
                     tone: .watch)
             }
@@ -923,16 +931,16 @@ final class NotchDisplayState {
             if self.contextPercent >= 86 {
                 return NotchThresholdAlert(
                     id: "context-86",
-                    title: "CONTEXT TIGHT",
-                    detail: "\(Int(self.contextPercent.rounded()))% used · compact soon",
+                    title: "CONTEXT NOW \(Int(self.contextPercent.rounded()))% FULL",
+                    detail: "\(Self.leftPercent(for: self.contextPercent))% context left · compact soon",
                     symbol: "text.badge.exclamationmark",
                     tone: .tight)
             }
             if self.contextPercent >= 75 {
                 return NotchThresholdAlert(
                     id: "context-75",
-                    title: "CONTEXT HEATING",
-                    detail: "\(Int(self.contextPercent.rounded()))% used · keep the next ask focused",
+                    title: "CONTEXT NOW \(Int(self.contextPercent.rounded()))% FULL",
+                    detail: "\(Self.leftPercent(for: self.contextPercent))% context left · keep next ask focused",
                     symbol: "eye.fill",
                     tone: .watch)
             }
@@ -941,8 +949,8 @@ final class NotchDisplayState {
         if let weekly = self.weekly, weekly.percent >= 92 {
             return NotchThresholdAlert(
                 id: "weekly-92",
-                title: "WEEKLY CAP HOT",
-                detail: "\(Int(weekly.percent.rounded()))% used · reset \(weekly.resetText)",
+                title: "7D NOW \(Int(weekly.percent.rounded()))% USED",
+                detail: Self.currentCapDetail(weekly),
                 symbol: "calendar.badge.exclamationmark",
                 tone: weekly.percent >= 97 ? .tight : .watch)
         }
@@ -954,8 +962,8 @@ final class NotchDisplayState {
         {
             return NotchThresholdAlert(
                 id: "spend-projected-over",
-                title: "SPEND CAP TRACKING",
-                detail: "on pace for \(String(format: "$%.0f", projected)) of \(String(format: "$%.0f", limit))",
+                title: "SPEND PROJECTED OVER",
+                detail: "month-end projection \(String(format: "$%.0f", projected)) vs \(String(format: "$%.0f", limit)) cap",
                 symbol: "dollarsign.circle.fill",
                 tone: .watch)
         }
@@ -963,13 +971,21 @@ final class NotchDisplayState {
         if self.fireActive {
             return NotchThresholdAlert(
                 id: "fire-\(self.fireTurnTokens)",
-                title: "BIG TURN",
-                detail: "\(compactTokens(self.fireTurnTokens)) tokens · \(Int(self.fireContextPercent.rounded()))% context",
+                title: "LARGE TURN RECORDED",
+                detail: "last turn \(compactTokens(self.fireTurnTokens)) · context now \(Int(self.fireContextPercent.rounded()))% full",
                 symbol: "flame.fill",
                 tone: .tight)
         }
 
         return nil
+    }
+
+    private static func currentCapDetail(_ window: AlcoveWindow) -> String {
+        "current \(Int(window.percent.rounded()))% used · \(Self.leftPercent(for: window.percent))% left · reset \(window.resetText)"
+    }
+
+    private static func leftPercent(for percent: Double) -> Int {
+        Int(max(0, 100 - percent).rounded())
     }
 
     // MARK: - Advisor helper
@@ -1308,7 +1324,9 @@ final class NotchDisplayState {
 
     private static func shortReset(for date: Date?) -> String {
         guard let date else { return "—" }
-        let secs = max(0, Int(date.timeIntervalSinceNow))
+        let secs = Int(date.timeIntervalSinceNow)
+        guard secs > 0 else { return "now" }
+        if secs < 60 { return "<1m" }
         if secs < 3600 { return "\(secs / 60)m" }
         let h = secs / 3600
         let m = (secs % 3600) / 60
@@ -1318,7 +1336,9 @@ final class NotchDisplayState {
 
     private static func countdown(to date: Date?) -> String {
         guard let date else { return "—" }
-        let secs = max(0, Int(date.timeIntervalSinceNow))
+        let secs = Int(date.timeIntervalSinceNow)
+        guard secs > 0 else { return "now" }
+        if secs < 60 { return "<1m" }
         let h = secs / 3600
         let m = (secs % 3600) / 60
         if h > 0 { return "\(h)h \(m)m" }
@@ -2442,10 +2462,8 @@ private struct CapsLensPanel: View {
     }
 
     private var capTitle: String {
-        if let signal = self.paceSignal,
-           signal.isWarning
-        {
-            return "Cap pace needs attention"
+        if let signal = self.paceSignal {
+            return signal.value
         }
         if self.state.bottleneckLabel == "5H CAP" || self.state.bottleneckLabel == "7D CAP" {
             return "\(self.state.bottleneckLabel) is the ceiling"
@@ -2460,9 +2478,7 @@ private struct CapsLensPanel: View {
         if let depleted = self.state.depletedTitle {
             return "\(depleted) · \(self.state.depletedCountdown ?? "wait")"
         }
-        if let signal = self.paceSignal,
-           signal.isWarning
-        {
+        if let signal = self.paceSignal {
             return signal.detail
         }
         if self.state.bottleneckLabel == "5H CAP" || self.state.bottleneckLabel == "7D CAP" {
@@ -2478,28 +2494,16 @@ private struct CapsLensPanel: View {
     }
 
     private var paceSignal: PaceSignal? {
-        let warningParts = [
-            Self.forecastWarningCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
-            Self.forecastWarningCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
+        let projectionParts = [
+            Self.forecastProjectionRiskCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
+            Self.forecastProjectionRiskCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
         ].compactMap { $0 }
-        if !warningParts.isEmpty {
+        if !projectionParts.isEmpty {
             return PaceSignal(
-                value: "Projected over cap",
-                detail: warningParts.joined(separator: " · "),
+                value: "Projection crosses a cap",
+                detail: projectionParts.joined(separator: " · "),
                 tone: .tight,
                 isWarning: true)
-        }
-
-        let reserveParts = [
-            Self.forecastReserveCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
-            Self.forecastReserveCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
-        ].compactMap { $0 }
-        if !reserveParts.isEmpty {
-            return PaceSignal(
-                value: "Reserve available",
-                detail: reserveParts.joined(separator: " · "),
-                tone: .calm,
-                isWarning: false)
         }
 
         let aheadParts = [
@@ -2508,30 +2512,41 @@ private struct CapsLensPanel: View {
         ].compactMap { $0 }
         if !aheadParts.isEmpty {
             return PaceSignal(
-                value: "Ahead of fair pace",
+                value: "Current use is ahead of fair pace",
                 detail: aheadParts.joined(separator: " · "),
                 tone: .watch,
+                isWarning: false)
+        }
+
+        let reserveParts = [
+            Self.forecastReserveCopy(label: "5h", window: self.state.fiveHour, forecast: self.state.fiveHourForecast),
+            Self.forecastReserveCopy(label: "7d", window: self.state.weekly, forecast: self.state.weeklyForecast),
+        ].compactMap { $0 }
+        if !reserveParts.isEmpty {
+            return PaceSignal(
+                value: "Current use has cap reserve",
+                detail: reserveParts.joined(separator: " · "),
+                tone: .calm,
                 isWarning: false)
         }
 
         return nil
     }
 
-    private static func forecastWarningCopy(
+    private static func forecastProjectionRiskCopy(
         label: String,
         window: NotchDisplayState.AlcoveWindow?,
         forecast: NotchDisplayState.WindowForecastSummary?) -> String?
     {
         guard let forecast else { return nil }
         if let runsOut = forecast.runsOutText {
-            return "\(label) \(runsOut)"
+            let current = window.map { "current \(Int($0.percent.rounded()))% used" } ?? "current usage unknown"
+            return "\(label) \(current); projected \(runsOut)"
         }
         if let over = forecast.projectedOverPercent {
-            return "\(label) \(over)% over if pace holds"
-        }
-        if forecast.aheadOfPacePercent >= 10 {
-            return Self.fairPaceComparisonCopy(label: label, window: window, forecast: forecast)
-                ?? "\(label) \(Int(forecast.aheadOfPacePercent.rounded()))% ahead"
+            let projected = Int((forecast.projectedAtResetPercent ?? Double(100 + over)).rounded())
+            let current = window.map { "current \(Int($0.percent.rounded()))% used" } ?? "current usage unknown"
+            return "\(label) \(current); projected \(projected)% by reset"
         }
         return nil
     }
@@ -2545,11 +2560,11 @@ private struct CapsLensPanel: View {
         if let reserve = forecast.projectedReservePercent,
            reserve >= 1
         {
-            return "\(label) \(Int(reserve.rounded()))% reserve if pace holds"
+            return "\(label) projected \(Int(reserve.rounded()))% left at reset"
         }
         if forecast.fairPaceReservePercent >= 2 {
             return Self.fairPaceComparisonCopy(label: label, window: window, forecast: forecast)
-                ?? "\(label) \(Int(forecast.fairPaceReservePercent.rounded()))% in reserve"
+                ?? "\(label) current use has \(Int(forecast.fairPaceReservePercent.rounded()))% fair-pace reserve"
         }
         return nil
     }
@@ -2563,7 +2578,7 @@ private struct CapsLensPanel: View {
               forecast.aheadOfPacePercent >= 2
         else { return nil }
         return Self.fairPaceComparisonCopy(label: label, window: window, forecast: forecast)
-            ?? "\(label) \(Int(forecast.aheadOfPacePercent.rounded()))% ahead"
+            ?? "\(label) current use is \(Int(forecast.aheadOfPacePercent.rounded()))% ahead of fair pace"
     }
 
     private static func fairPaceComparisonCopy(
@@ -2576,11 +2591,11 @@ private struct CapsLensPanel: View {
         let fair = Int(max(0, min(100, window.percent - forecast.paceDeltaPercent)).rounded())
         if forecast.aheadOfPacePercent >= 2 {
             let ahead = Int(forecast.aheadOfPacePercent.rounded())
-            return "\(label) \(used)% used vs \(fair)% fair (+\(ahead)%)"
+            return "\(label) current \(used)% used; fair pace now \(fair)% (+\(ahead)%)"
         }
         if forecast.fairPaceReservePercent >= 2 {
             let reserve = Int(forecast.fairPaceReservePercent.rounded())
-            return "\(label) \(used)% used vs \(fair)% fair (\(reserve)% reserve)"
+            return "\(label) current \(used)% used; fair pace now \(fair)% (\(reserve)% reserve)"
         }
         return nil
     }
@@ -2600,21 +2615,22 @@ private struct CapsLensPanel: View {
     {
         guard let forecast else { return nil }
         if let runsOut = forecast.runsOutText {
-            return "\(label) \(runsOut)"
+            return "\(label) projected \(runsOut)"
         }
         if let over = forecast.projectedOverPercent {
-            return "\(label) \(over)% over if pace holds"
+            let projected = Int((forecast.projectedAtResetPercent ?? Double(100 + over)).rounded())
+            return "\(label) projected \(projected)% used by reset"
         }
         if let reserve = forecast.projectedReservePercent,
            reserve >= 1
         {
-            return "\(label) \(Int(reserve.rounded()))% reserve"
+            return "\(label) projected \(Int(reserve.rounded()))% left at reset"
         }
         if forecast.fairPaceReservePercent >= 2 {
-            return "\(label) \(Int(forecast.fairPaceReservePercent.rounded()))% in reserve"
+            return "\(label) current use has \(Int(forecast.fairPaceReservePercent.rounded()))% fair-pace reserve"
         }
         if forecast.aheadOfPacePercent >= 2 {
-            return "\(label) \(Int(forecast.aheadOfPacePercent.rounded()))% ahead"
+            return "\(label) current use is \(Int(forecast.aheadOfPacePercent.rounded()))% ahead of fair pace"
         }
         return nil
     }
@@ -5540,12 +5556,12 @@ private struct NotchWindowForecastLine: View {
 
     private var primaryText: String {
         if self.forecast.aheadOfPacePercent >= 2 {
-            return "\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of pace"
+            return "\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of fair pace"
         }
         if self.forecast.fairPaceReservePercent >= 2 {
-            return "\(Int(self.forecast.fairPaceReservePercent.rounded()))% in reserve"
+            return "\(Int(self.forecast.fairPaceReservePercent.rounded()))% fair-pace reserve"
         }
-        return "on fair pace"
+        return "current use on fair pace"
     }
 
     private var primaryTone: Color {
@@ -5581,13 +5597,13 @@ private struct NotchWindowForecastLine: View {
                         .font(.geist(size: 9))
                         .foregroundStyle(NotchPalette.toneTight)
                 } else if let over = self.forecast.projectedOverPercent {
-                    Text("\(over)% over if pace holds")
+                    Text("projected \(100 + over)% used by reset")
                         .font(.geist(size: 9))
                         .foregroundStyle(NotchPalette.toneTight)
                 } else if let reserve = self.forecast.projectedReservePercent,
                           reserve >= 1
                 {
-                    Text("\(Int(reserve.rounded()))% reserve if pace holds")
+                    Text("projected \(Int(reserve.rounded()))% left at reset")
                         .font(.geist(size: 9))
                         .foregroundStyle(NotchPalette.live)
                 } else if let proj = self.forecast.projectedAtResetPercent {
@@ -6444,7 +6460,7 @@ private struct NotchThresholdSheet: View {
     }
 
     private var sheetHeight: CGFloat {
-        max(86, self.notchHeight + 58)
+        max(98, self.notchHeight + 70)
     }
 
     var body: some View {
@@ -6486,7 +6502,7 @@ private struct NotchThresholdSheet: View {
                         Text(self.alert.detail)
                             .font(.geist(size: 10, weight: .medium))
                             .foregroundStyle(NotchPalette.secondaryText)
-                            .lineLimit(1)
+                            .lineLimit(2)
                             .truncationMode(.tail)
                     }
 
@@ -6552,56 +6568,56 @@ private struct NotchAlertDebugSection: View {
     private static let fixtures: [NotchThresholdAlert] = [
         NotchThresholdAlert(
             id: "debug-burst-5",
-            title: "BURST IN 5m",
-            detail: "Slow down; 5h cap is projected to hit.",
+            title: "5H PROJECTED FULL",
+            detail: "current 94% used · projected full in 5m",
             symbol: "flame.fill",
             tone: .tight),
         NotchThresholdAlert(
             id: "debug-burst-15",
-            title: "BURST IN 15m",
-            detail: "Projection says the burst window is closing.",
+            title: "5H PROJECTED FULL",
+            detail: "current 89% used · projected full in 15m",
             symbol: "speedometer",
             tone: .watch),
         NotchThresholdAlert(
             id: "debug-burst-hot",
-            title: "BURST HOT",
-            detail: "95% used · final turns only",
+            title: "5H NOW 95% USED",
+            detail: "current 95% used · 5% left · reset 42m",
             symbol: "bolt.trianglebadge.exclamationmark.fill",
             tone: .tight),
         NotchThresholdAlert(
             id: "debug-context-75",
-            title: "CONTEXT HEATING",
-            detail: "75% used · keep the next ask focused",
+            title: "CONTEXT NOW 75% FULL",
+            detail: "25% context left · keep next ask focused",
             symbol: "eye.fill",
             tone: .watch),
         NotchThresholdAlert(
             id: "debug-context-86",
-            title: "CONTEXT TIGHT",
-            detail: "86% used · compact soon",
+            title: "CONTEXT NOW 86% FULL",
+            detail: "14% context left · compact soon",
             symbol: "text.badge.exclamationmark",
             tone: .tight),
         NotchThresholdAlert(
             id: "debug-weekly",
-            title: "WEEKLY CAP HOT",
-            detail: "93% used · reset in 2d",
+            title: "7D NOW 93% USED",
+            detail: "current 93% used · 7% left · reset 2d",
             symbol: "calendar.badge.exclamationmark",
             tone: .watch),
         NotchThresholdAlert(
             id: "debug-spend",
-            title: "SPEND CAP TRACKING",
-            detail: "on pace for $118 of $100",
+            title: "SPEND PROJECTED OVER",
+            detail: "month-end projection $118 vs $100 cap",
             symbol: "dollarsign.circle.fill",
             tone: .watch),
         NotchThresholdAlert(
             id: "debug-big-turn",
-            title: "BIG TURN",
-            detail: "42K tokens · 78% context",
+            title: "LARGE TURN RECORDED",
+            detail: "last turn 42K · context now 78% full",
             symbol: "flame.fill",
             tone: .tight),
         NotchThresholdAlert(
             id: "debug-depleted",
-            title: "BURST DEPLETED",
-            detail: "back in 18m",
+            title: "CAP DEPLETED NOW",
+            detail: "5h burst depleted · reset in 18m",
             symbol: "lock.fill",
             tone: .tight),
     ]

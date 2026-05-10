@@ -327,12 +327,6 @@ private struct AlertStartupSettings: View {
 
     var body: some View {
         SettingsSection(title: "Alerts and startup") {
-            SettingsMenuRow(title: "Threshold alerts", value: self.model.alertMode.title) {
-                Button("Cycle to \(self.model.alertMode.next.title)") {
-                    self.model.cycleAlertMode()
-                }
-            }
-
             SettingsToggleRow(
                 title: "Launch at login",
                 detail: self.model.isLaunchAtLoginEnabled ? "enabled" : "off",
@@ -880,12 +874,6 @@ private struct StatuslineFooter: View {
                             }
                         }
                     }
-                }
-
-                Divider()
-
-                Button(self.model.alertMode.title) {
-                    self.model.cycleAlertMode()
                 }
 
                 Button {

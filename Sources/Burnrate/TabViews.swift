@@ -404,12 +404,12 @@ private struct ForecastLine: View {
 
     private var primaryText: String {
         if self.forecast.aheadOfPacePercent >= 2 {
-            return "\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of pace"
+            return "\(Int(self.forecast.aheadOfPacePercent.rounded()))% ahead of fair pace"
         }
         if self.forecast.fairPaceReservePercent >= 2 {
-            return "\(Int(self.forecast.fairPaceReservePercent.rounded()))% in reserve"
+            return "\(Int(self.forecast.fairPaceReservePercent.rounded()))% fair-pace reserve"
         }
-        return "on fair pace"
+        return "current use on fair pace"
     }
 
     private var primaryTone: Color {
@@ -444,13 +444,13 @@ private struct ForecastLine: View {
                         .font(.geist(size: 9))
                         .foregroundStyle(DesignSystem.Colors.danger)
                 } else if let over = self.forecast.projectedOverPercent {
-                    Text("\(over)% over if pace holds")
+                    Text("projected \(100 + over)% used by reset")
                         .font(.geist(size: 9))
                         .foregroundStyle(DesignSystem.Colors.danger)
                 } else if let reserve = self.forecast.projectedReservePercent,
                           reserve >= 1
                 {
-                    Text("\(Int(reserve.rounded()))% reserve if pace holds")
+                    Text("projected \(Int(reserve.rounded()))% left at reset")
                         .font(.geist(size: 9))
                         .foregroundStyle(DesignSystem.Colors.success)
                 } else {

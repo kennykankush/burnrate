@@ -377,7 +377,6 @@ final class MenuBarModel {
     var lastRefreshAt: Date?
     private var lastPreviewRefreshAt: Date?
     var fireEvent: FireEvent?
-    var alertMode: UsageAlertMode = UsageAlertMode(rawValue: UserDefaults.standard.string(forKey: UsageNotificationController.alertModeKey) ?? "") ?? .all
     var isLaunchAtLoginEnabled: Bool = LaunchAtLoginManager.isEnabled
     var selectedMenuBarModule: MenuBarModule = MenuBarModule(rawValue: UserDefaults.standard.string(forKey: MenuBarModel.menuBarModuleKey) ?? "") ?? .context
     var menuBarDisplayMode: MenuBarDisplayMode = MenuBarDisplayMode(
@@ -670,7 +669,6 @@ final class MenuBarModel {
     private static let overageHistoryMaxAgeDays: TimeInterval = 14 * 86400
 
     private let source = UsageSnapshotSource()
-    private let notificationController = UsageNotificationController()
     private let identityFileWatcher = LocalFileChangeWatcher()
     private let previewContextWatcher = LocalFileChangeWatcher()
     private var hasStarted = false
@@ -1040,7 +1038,6 @@ final class MenuBarModel {
         self.hasStarted = true
         self.loadOverageHistory()
         self.refreshTask = Task {
-            await self.notificationController.prepare()
             await self.refreshFastInitialOverview()
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled, !self.isPreviewingSession {
@@ -1125,7 +1122,6 @@ final class MenuBarModel {
             await self.applyOverview(
                 overview,
                 recordSamples: true,
-                evaluateNotifications: true,
                 markFullRefresh: true)
         } catch {
             self.lastError = UsageError.from(error)
@@ -1140,7 +1136,6 @@ final class MenuBarModel {
         await self.applyOverview(
             overview,
             recordSamples: false,
-            evaluateNotifications: false,
             markFullRefresh: false)
     }
 
@@ -1179,7 +1174,6 @@ final class MenuBarModel {
             await self.applyOverview(
                 overview,
                 recordSamples: false,
-                evaluateNotifications: false,
                 markFullRefresh: false)
         } catch {
             self.lastError = UsageError.from(error)
@@ -1190,7 +1184,6 @@ final class MenuBarModel {
     private func applyOverview(
         _ overview: UsageOverview,
         recordSamples: Bool,
-        evaluateNotifications: Bool,
         markFullRefresh: Bool) async
     {
         self.detectFireEvents(in: overview)
@@ -1200,9 +1193,6 @@ final class MenuBarModel {
             self.recordOverageSamples(from: overview, now: now)
         }
         self.overview = overview
-        if evaluateNotifications {
-            await self.notificationController.evaluate(overview)
-        }
         if overview.snapshot(for: self.selectedProvider) == nil,
            let first = overview.snapshots.first
         {
@@ -1749,11 +1739,6 @@ final class MenuBarModel {
             try? await Task.sleep(for: .seconds(15))
             self?.fireEvent = nil
         }
-    }
-
-    func cycleAlertMode() {
-        self.alertMode = self.alertMode.next
-        UserDefaults.standard.set(self.alertMode.rawValue, forKey: UsageNotificationController.alertModeKey)
     }
 
     func toggleLaunchAtLogin() {
