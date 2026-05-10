@@ -778,8 +778,8 @@ final class NotchDisplayState {
         }
 
         let capParts = [
-            self.fiveHour.map { "5h \(Int($0.percent.rounded()))%" },
-            self.weekly.map { "7d \(Int($0.percent.rounded()))%" },
+            self.fiveHour.map { "5h \(Int($0.percent.rounded()))% used" },
+            self.weekly.map { "7d \(Int($0.percent.rounded()))% used" },
         ].compactMap { $0 }
         self.capSummary = capParts.isEmpty ? "caps unavailable" : capParts.joined(separator: " · ")
 
@@ -2576,11 +2576,11 @@ private struct CapsLensPanel: View {
         let fair = Int(max(0, min(100, window.percent - forecast.paceDeltaPercent)).rounded())
         if forecast.aheadOfPacePercent >= 2 {
             let ahead = Int(forecast.aheadOfPacePercent.rounded())
-            return "\(label) \(used)% vs \(fair)% fair (+\(ahead)%)"
+            return "\(label) \(used)% used vs \(fair)% fair (+\(ahead)%)"
         }
         if forecast.fairPaceReservePercent >= 2 {
             let reserve = Int(forecast.fairPaceReservePercent.rounded())
-            return "\(label) \(used)% vs \(fair)% fair (\(reserve)% reserve)"
+            return "\(label) \(used)% used vs \(fair)% fair (\(reserve)% reserve)"
         }
         return nil
     }
@@ -2621,8 +2621,8 @@ private struct CapsLensPanel: View {
 
     private var readableCapSummary: String {
         let parts = [
-            self.state.fiveHour.map { "5h burst \(Int($0.percent.rounded()))%" },
-            self.state.weekly.map { "weekly \(Int($0.percent.rounded()))%" },
+            self.state.fiveHour.map { "5h burst \(Int($0.percent.rounded()))% used" },
+            self.state.weekly.map { "weekly \(Int($0.percent.rounded()))% used" },
         ].compactMap { $0 }
         return parts.joined(separator: " · ")
     }
@@ -2663,9 +2663,11 @@ private struct CapGaugeCard: View {
                     .contentTransition(.numericText())
                     .lineLimit(1)
                     .minimumScaleFactor(0.68)
-                Text("%")
-                    .font(.geist(size: 11, weight: .bold))
+                Text(self.window == nil ? "" : "% used")
+                    .font(.geist(size: 9, weight: .bold))
                     .foregroundStyle(NotchPalette.tertiaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.74)
             }
 
             NotchMiniMeter(percent: self.percent, tone: self.tone, isActive: self.window != nil)
@@ -2692,38 +2694,43 @@ private struct CapGaugeCard: View {
 
     private var detail: String {
         guard let window = self.window else { return "OAuth windows not detected yet" }
-        if window.percent >= 99 { return "depleted · back \(window.resetText)" }
-        if let runsOut = self.forecast?.runsOutText { return runsOut }
+        let baseline = "\(self.leftPercent(for: window))% left · reset \(window.resetText)"
+        if window.percent >= 99 { return baseline }
+        if let runsOut = self.forecast?.runsOutText { return "\(baseline)\n\(runsOut)" }
         if let over = self.forecast?.projectedOverPercent {
-            return "\(over)% over if pace holds"
+            return "\(baseline)\nprojects \(over)% over"
         }
         if let reserve = self.forecast?.projectedReservePercent,
            reserve >= 1
         {
-            return "\(Int(reserve.rounded()))% reserve if pace holds"
+            return "\(baseline)\nprojects \(Int(reserve.rounded()))% left"
         }
         if let reserve = self.forecast?.fairPaceReservePercent,
            reserve >= 2
         {
             if let fairPacePercent {
-                return "\(Int(reserve.rounded()))% reserve · fair \(fairPacePercent)%"
+                return "\(baseline)\nfair pace \(fairPacePercent)% used"
             }
-            return "\(Int(reserve.rounded()))% reserve"
+            return "\(baseline)\n\(Int(reserve.rounded()))% fair reserve"
         }
         if let ahead = self.forecast?.aheadOfPacePercent,
            ahead >= 2
         {
             if let fairPacePercent {
-                return "\(Int(ahead.rounded()))% ahead · fair \(fairPacePercent)%"
+                return "\(baseline)\nfair pace \(fairPacePercent)% used"
             }
-            return "\(Int(ahead.rounded()))% ahead of fair pace"
+            return "\(baseline)\n\(Int(ahead.rounded()))% ahead of fair pace"
         }
         if let projected = self.forecast?.projectedAtResetPercent,
            projected >= window.percent + 1
         {
-            return "tracking to \(Int(projected.rounded()))% by reset"
+            return "\(baseline)\nprojects \(Int(projected.rounded()))% used"
         }
-        return "reset \(window.resetText)"
+        return baseline
+    }
+
+    private func leftPercent(for window: NotchDisplayState.AlcoveWindow) -> Int {
+        Int(max(0, 100 - window.percent).rounded())
     }
 }
 
@@ -5584,7 +5591,7 @@ private struct NotchWindowForecastLine: View {
                         .font(.geist(size: 9))
                         .foregroundStyle(NotchPalette.live)
                 } else if let proj = self.forecast.projectedAtResetPercent {
-                    Text("trending to \(Int(proj.rounded()))% by reset")
+                    Text("trending to \(Int(proj.rounded()))% used by reset")
                         .font(.geist(size: 9))
                         .foregroundStyle(NotchPalette.tertiaryText)
                 }

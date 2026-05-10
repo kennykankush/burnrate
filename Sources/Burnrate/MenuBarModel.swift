@@ -221,8 +221,8 @@ enum MenuBarModule: String, CaseIterable, Identifiable {
         switch self {
         case .context: "Context %"
         case .turnsLeft: "Turns left"
-        case .fiveHour: "5h burst %"
-        case .weekly: "Weekly %"
+        case .fiveHour: "5h burst used"
+        case .weekly: "Weekly used"
         case .codexSurface: "Codex map"
         case .dollarsPerMin: "USD / minute"
         case .tokensPerMin: "Tokens / minute"
@@ -305,6 +305,20 @@ enum MenuBarIconStyle: String, CaseIterable, Identifiable, Hashable {
 struct MenuBarDisplay: Equatable {
     let label: String
     let value: String
+    let detail: String?
+
+    init(label: String, value: String, detail: String? = nil) {
+        self.label = label
+        self.value = value
+        self.detail = detail
+    }
+
+    var toolTip: String {
+        if let detail, !detail.isEmpty {
+            return "\(self.label) \(self.value) - \(detail)"
+        }
+        return "\(self.label) \(self.value)"
+    }
 
     static let placeholder = MenuBarDisplay(label: "—", value: "—")
 }
@@ -923,10 +937,10 @@ final class MenuBarModel {
             return MenuBarDisplay(label: module.label, value: "\(turns)")
         case .fiveHour:
             guard let window = snap.windows.first(where: Self.is5hWindow) else { return nil }
-            return MenuBarDisplay(label: module.label, value: "\(Int(window.usedPercent.rounded()))%")
+            return Self.capDisplay(for: module, window: window)
         case .weekly:
             guard let window = snap.windows.first(where: Self.is7dWindow) else { return nil }
-            return MenuBarDisplay(label: module.label, value: "\(Int(window.usedPercent.rounded()))%")
+            return Self.capDisplay(for: module, window: window)
         case .codexSurface:
             guard let surface = snap.codexSurface else { return nil }
             return MenuBarDisplay(
@@ -950,6 +964,16 @@ final class MenuBarModel {
             let pct = Int(Double(agg.lifetimeCacheReadTokens) / Double(denom) * 100)
             return MenuBarDisplay(label: module.label, value: "\(pct)%")
         }
+    }
+
+    private static func capDisplay(for module: MenuBarModule, window: UsageWindow) -> MenuBarDisplay {
+        let used = Int(window.usedPercent.rounded())
+        let left = Int(window.remainingPercent.rounded())
+        let reset = DisplayText.reset(window.resetsAt) ?? "reset unknown"
+        return MenuBarDisplay(
+            label: module.label,
+            value: "\(used)%",
+            detail: "\(used)% used, \(left)% left, \(reset)")
     }
 
     private static func is5hWindow(_ w: UsageWindow) -> Bool {

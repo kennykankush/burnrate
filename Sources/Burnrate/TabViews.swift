@@ -299,12 +299,14 @@ private struct WindowRow: View {
                 MeterBar(tone: self.tone, usedPercent: self.window.usedPercent)
                     .frame(maxWidth: .infinity)
 
-                Text("\(Int(self.window.usedPercent.rounded()))%")
+                Text("\(Int(self.window.usedPercent.rounded()))% used")
                     .font(.geistMono(size: 11, weight: .semibold))
                     .foregroundStyle(self.tone.color)
                     .contentTransition(.numericText())
                     .animation(.snappy(duration: 0.5), value: self.window.usedPercent)
-                    .frame(width: 32, alignment: .trailing)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .frame(width: 58, alignment: .trailing)
 
                 Text(DisplayText.resetShort(self.window.resetsAt))
                     .font(.geistMono(size: 9))
@@ -452,7 +454,7 @@ private struct ForecastLine: View {
                         .font(.geist(size: 9))
                         .foregroundStyle(DesignSystem.Colors.success)
                 } else {
-                    Text("trending to \(Int(projected.rounded()))% by reset")
+                    Text("trending to \(Int(projected.rounded()))% used by reset")
                         .font(.geist(size: 9))
                         .foregroundStyle(DesignSystem.Colors.tertiaryText)
                 }

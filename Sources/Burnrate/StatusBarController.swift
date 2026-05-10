@@ -218,6 +218,7 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
             iconSymbol: iconSymbol,
             iconTint: accent,
             mode: self.model.menuBarDisplayMode)
+        self.statusItem?.button?.toolTip = display.toolTip
         let targetWidth = ceil(stack.intrinsicContentSize.width) + 14
         self.statusItem?.length = max(self.model.menuBarDisplayMode == .iconOnly ? 28 : 34, targetWidth)
     }

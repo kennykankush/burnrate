@@ -488,11 +488,12 @@ private struct CodexHealthCommandCard: View {
 
     private var windowValue: String {
         guard let window = self.snapshot.mostPressedWindow else { return "--" }
-        return "\(Int(window.usedPercent.rounded()))%"
+        return "\(Int(window.usedPercent.rounded()))% used"
     }
 
     private var windowDetail: String {
-        DisplayText.resetShort(self.snapshot.mostPressedWindow?.resetsAt)
+        guard let window = self.snapshot.mostPressedWindow else { return "no quota" }
+        return "\(window.title.lowercased()) reset \(DisplayText.resetShort(window.resetsAt))"
     }
 }
 
